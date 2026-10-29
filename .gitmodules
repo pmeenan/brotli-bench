@@ -1,0 +1,11 @@
+[submodule "vendor/brotli-c"]
+	path = vendor/brotli-c
+	url = https://github.com/google/brotli.git
+[submodule "vendor/rust-brotli-decompressor"]
+	path = vendor/rust-brotli-decompressor
+	url = https://github.com/pmeenan/rust-brotli-decompressor.git
+	branch = perf
+[submodule "vendor/rust-brotli"]
+	path = vendor/rust-brotli
+	url = https://github.com/pmeenan/rust-brotli.git
+	branch = perf

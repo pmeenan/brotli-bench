@@ -1,0 +1,29 @@
+From 39b1dd82bc918011288f7a2925c914deaa3966b4 Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:47:17 +0000
+Subject: [PATCH 6/8] enc: fix off-by-one in StitchToPreviousBlockH10
+
+C stores the last MAX_TREE_COMP_LENGTH - 1 positions
+(i_start = position - MAX_TREE_COMP_LENGTH + 1). Rust re-inserted
+position - MAX_TREE_COMP_LENGTH, which was already in the tree, and
+re-rooted it differently. Fixes q10/q11 divergence in flushed streams.
+---
+ src/enc/backward_references/hq.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/enc/backward_references/hq.rs b/src/enc/backward_references/hq.rs
+index 380a4e7..cb77900 100644
+--- a/src/enc/backward_references/hq.rs
++++ b/src/enc/backward_references/hq.rs
+@@ -273,7 +273,7 @@ pub fn StitchToPreviousBlockH10<
+         /* Store the last `MAX_TREE_COMP_LENGTH - 1` positions in the hasher.
+         These could not be calculated before, since they require knowledge
+         of both the previous and the current block. */
+-        let i_start = position - Params::max_tree_comp_length() as usize;
++        let i_start = position - Params::max_tree_comp_length() as usize + 1;
+         let i_end = min(position, i_start.wrapping_add(num_bytes));
+         for i in i_start..i_end {
+             /* Maximum distance is window size - 16, see section 9.1. of the spec.
+-- 
+2.56.0.317.g454f8302e1-goog
+

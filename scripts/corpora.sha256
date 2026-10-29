@@ -1,0 +1,21 @@
+# sha256 checksums for corpora/ (paths relative to corpora/). Maintained by
+# scripts/fetch_corpora.sh; wiki-*.html and dictionary/wiki-html.dict may drift.
+3c8f27e6009ccfd710a905e6dcf12d0ee3c6f2ac7da05b0572d3e0d12e736fc8  bootstrap-5.3.3.min.css
+3017df4a76db5f01c2b99b603d88b03106df13bcfe18e67b7c13c2341d3a67df  dictionary/bootstrap-5.3.2.min.css
+a0fe8723dcf55da64d06b25446d0a8513e52527c45afcb37073465f9c6f352af  dictionary/jquery-3.6.4.min.js
+babfd8947314f7a3311c4b32ddf1c6b336476acecdcc7e114250f8b4356f161c  dictionary/lodash-4.17.20.min.js
+21758ed084cd0e37e735722ee4f3957ea960628a29dfa6c3ce1a1d47a2d6e4f7  dictionary/react-dom-18.2.0.production.min.js
+2d2858d80a3cc80badb94c8aa1619a4d14bd12bb37b0aaf69056ba8615fc9b8d  dictionary/vue-3.3.13.global.prod.js
+99dc58032933bab3e73ad4ded2edc653b02b84caf3daa2886ceeccb658729e64  dictionary/wiki-html.dict
+5ceaaba22d75b58e04150311f596306562a3e595e27ed4b1dfa451b82dda9e50  font-awesome-6.5.2.all.min.css
+4aaadf3d1b99da01265e079e57fe08e78a4f1c469fac62d2c8579b456f122a78  foundation-6.8.1.min.css
+78a85aca2f0b110c29e0d2b137e09f0a1fb7a8e554b499f740d6744dc8962cfe  jquery-3.7.1.js
+fc9a93dd241f6b045cbff0481cf4e1901becd0e12fb45166a8f17f95823f0b1a  jquery-3.7.1.min.js
+a9705dfc47c0763380d851ab1801be6f76019f6b67e40e9b873f8b4a0603f7a9  lodash-4.17.21.min.js
+5b3eef58af8f051a73350fb530ccd1826e6a21ea840a60d5a9b81acb6d3823a0  moment-2.30.1.min.js
+35f4f974f4b2bcd44da73963347f8952e341f83909e4498227d4e26b98f66f0d  react-dom-18.3.1.production.min.js
+9274bbcec8d96168626c732b5d31c775aa8cfb7eaa0599bec0c175908a2c1ce2  three-r128.min.js
+b50eeefe35d41636bb96c92b40f1df0b4fb7914e07b3c625b1ec15e9748767b9  vue-3.4.38.global.prod.js
+128c47c2f21bca68b266b967c1057a980823b9e3b0f96fda172ad4cf915942ca  wiki-Brotli.html
+189eea01589c8f97e9ff4b4ec4184b87bde6055bb8c20c2dc3e505a3c017f4cc  wiki-Espresso.html
+57d1a61085d7d6a5e1bdad970fcf2dc234a40e3c8a9186f930599a2f02dc203d  wiki-Huffman_coding.html

@@ -1,0 +1,50 @@
+From b0c7a3955fac9d2e597733dcff0e669c99129147 Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:43:59 +0000
+Subject: [PATCH 1/8] enc: port C's RLE hash-poisoning guard in
+ CreateBackwardReferences
+
+C (brotli a629289) only stores the last 4*distance positions of a copy
+when distance < len/4. Fixes q5-q8 bitstream divergence on RLE-ish input
+and is a prerequisite for q2-q4/q9 parity.
+---
+ src/enc/backward_references/mod.rs | 23 +++++++++++++++++------
+ 1 file changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/src/enc/backward_references/mod.rs b/src/enc/backward_references/mod.rs
+index fb172d4..92bbd5f 100644
+--- a/src/enc/backward_references/mod.rs
++++ b/src/enc/backward_references/mod.rs
+@@ -2515,12 +2515,23 @@ fn CreateBackwardReferences<AH: AnyHasher>(
+             }
+             *num_literals = num_literals.wrapping_add(insert_length);
+             insert_length = 0usize;
+-            hasher.StoreRange(
+-                ringbuffer,
+-                ringbuffer_mask,
+-                position.wrapping_add(2),
+-                min(position.wrapping_add(sr.len), store_end),
+-            );
++            {
++                // PARITY: C avoids hash poisoning with RLE data: for copies with
++                // `distance < len / 4` only the last `4 * distance` positions are
++                // stored (brotli a629289).
++                let mut range_start = position.wrapping_add(2);
++                let range_end = min(position.wrapping_add(sr.len), store_end);
++                if sr.distance < (sr.len >> 2) {
++                    range_start = min(
++                        range_end,
++                        max(
++                            range_start,
++                            position.wrapping_add(sr.len).wrapping_sub(sr.distance << 2),
++                        ),
++                    );
++                }
++                hasher.StoreRange(ringbuffer, ringbuffer_mask, range_start, range_end);
++            }
+             position = position.wrapping_add(sr.len);
+         } else {
+             insert_length = insert_length.wrapping_add(1);
+-- 
+2.56.0.317.g454f8302e1-goog
+

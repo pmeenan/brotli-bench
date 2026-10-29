@@ -1,0 +1,97 @@
+From 2eefc8b3b8cfa519e664b9c4c9dfc6c7c3a9b017 Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:45:35 +0000
+Subject: [PATCH 4/8] enc: make FastLog2f64 return f64 like C's FastLog2
+
+C's FastLog2 returns double (float-literal table below 256, double log2
+above). Rust computed log2 in f32, which flips near-ties in the Zopfli
+literal cost model at q10/q11. Also use C's prologue expression in the
+UTF-8 literal cost loop, and cast the missing-symbol cost to float before
+adding 2 as C does. no_std/portable-float keep the table approximation.
+---
+ src/enc/backward_references/hq.rs |  2 +-
+ src/enc/literal_cost.rs           |  8 ++++----
+ src/enc/util.rs                   | 13 ++++++++-----
+ 3 files changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/src/enc/backward_references/hq.rs b/src/enc/backward_references/hq.rs
+index a22badc..380a4e7 100644
+--- a/src/enc/backward_references/hq.rs
++++ b/src/enc/backward_references/hq.rs
+@@ -1059,7 +1059,7 @@ fn SetCost(histogram: &[u32], histogram_size: usize, literal_histogram: bool, co
+         }
+     }
+ 
+-    let missing_symbol_cost = FastLog2f64(missing_symbol_sum) + 2.0;
++    let missing_symbol_cost = FastLog2f64(missing_symbol_sum) as floatX + 2.0;
+     for i in 0..histogram_size {
+         if histogram[i] == 0 {
+             cost[i] = missing_symbol_cost;
+diff --git a/src/enc/literal_cost.rs b/src/enc/literal_cost.rs
+index df1d8ba..14d2fd1 100644
+--- a/src/enc/literal_cost.rs
++++ b/src/enc/literal_cost.rs
+@@ -158,15 +158,15 @@ fn EstimateBitCostsForLiteralsUTF8(
+                 if histo == 0usize {
+                     histo = 1;
+                 }
+-                lit_cost = FastLog2f64(in_window_utf8[utf8_pos] as u64) as f64
+-                    - FastLog2f64(histo as u64) as f64;
++                lit_cost = FastLog2f64(in_window_utf8[utf8_pos] as u64) - FastLog2f64(histo as u64);
+                 lit_cost += 0.02905;
+                 if lit_cost < 1.0 {
+                     lit_cost *= 0.5;
+                     lit_cost += 0.5;
+                 }
+                 if i < 2000usize {
+-                    lit_cost += (0.7 - (2000usize).wrapping_sub(i) as (f64) / 2000.0 * 0.35);
++                    // PARITY: same expression (and rounding) as C.
++                    lit_cost += 0.35 + (0.35 / 2000.0) * (i as f64);
+                 }
+                 cost[i] = lit_cost as floatX;
+             }
+@@ -224,7 +224,7 @@ pub fn BrotliEstimateBitCostsForLiterals(
+                 {
+                     //precision is vital here: lets keep double precision
+                     let mut lit_cost: f64 =
+-                        FastLog2f64(in_window as u64) as f64 - FastLog2f64(histo as u64) as f64;
++                        FastLog2f64(in_window as u64) - FastLog2f64(histo as u64);
+                     lit_cost += 0.029;
+                     if lit_cost < 1.0 {
+                         lit_cost *= 0.5;
+diff --git a/src/enc/util.rs b/src/enc/util.rs
+index 9c870c8..da9ffde 100644
+--- a/src/enc/util.rs
++++ b/src/enc/util.rs
+@@ -41,20 +41,23 @@ pub fn FastLog2(v: u64) -> floatX {
+     }
+ }
+ 
++/// Double-precision `log2`, matching C's `FastLog2` (which returns `double`):
++/// the f32 table below 256 (C's table entries are float literals), a full
++/// double-precision `log2` above.
+ #[cfg(all(feature = "std", not(feature = "portable-float")))]
+ #[inline(always)]
+-pub fn FastLog2f64(v: u64) -> floatX {
++pub fn FastLog2f64(v: u64) -> f64 {
+     if v < 256 {
+-        logs_8[v as usize]
++        logs_8[v as usize] as f64
+     } else {
+-        (v as floatX).log2()
++        (v as f64).log2()
+     }
+ }
+ 
+ #[cfg(any(not(feature = "std"), feature = "portable-float"))]
+ #[inline(always)]
+-pub fn FastLog2f64(v: u64) -> floatX {
+-    FastLog2(v) as floatX
++pub fn FastLog2f64(v: u64) -> f64 {
++    FastLog2(v) as f64
+ }
+ 
+ #[inline]
+-- 
+2.56.0.317.g454f8302e1-goog
+

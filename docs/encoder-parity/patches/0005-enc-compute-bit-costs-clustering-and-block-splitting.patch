@@ -1,0 +1,890 @@
+From c8b4ee51fd05fbbce929496b1d5496297fddc912 Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:47:05 +0000
+Subject: [PATCH 5/8] enc: compute bit costs, clustering and block splitting in
+ f64 like C
+
+C does BitsEntropy, PopulationCost, histogram bit_cost_, HistogramPair /
+ClusterCostDiff, FindBlocks (insert_cost, cost, block_switch_cost),
+BitCost, the greedy splitter entropies and ChooseContextMap /
+ShouldCompress in double, with FastLog2 (double log2 for v >= 256). Rust
+used f32 and the 16-bit FastLog2u16 table (which also truncated counts
+>= 65536). This flipped block splits and cluster assignments at q10/q11.
+
+FindBlocks now runs C's scalar double DP; insert_cost is kept as f64 bit
+patterns in a u64 allocation because BrotliAlloc has no f64 allocator.
+The 8xf32 SIMD update_cost_and_signal is removed.
+
+Also run 10 block-split refinement iterations at q11 like C
+(quality < HQ_ZOPFLIFICATION_QUALITY ? 3 : 10); Rust used 3.
+---
+ src/enc/bit_cost.rs                   |  69 ++++++-----
+ src/enc/block_splitter.rs             | 168 ++++++++------------------
+ src/enc/cluster.rs                    |  24 ++--
+ src/enc/compress_fragment_two_pass.rs |   8 +-
+ src/enc/encode.rs                     |  14 +--
+ src/enc/histogram.rs                  |  24 ++--
+ src/enc/metablock.rs                  |  25 ++--
+ 7 files changed, 129 insertions(+), 203 deletions(-)
+
+diff --git a/src/enc/bit_cost.rs b/src/enc/bit_cost.rs
+index 948f9ca..1f52cda 100644
+--- a/src/enc/bit_cost.rs
++++ b/src/enc/bit_cost.rs
+@@ -3,40 +3,39 @@ use core::cmp::{max, min};
+ 
+ use super::super::alloc::SliceWrapper;
+ use super::histogram::CostAccessors;
+-use super::util::{FastLog2, FastLog2u16};
++use super::util::FastLog2f64;
+ use super::vectorization::Mem256i;
+-use crate::enc::floatX;
+ 
+ const BROTLI_REPEAT_ZERO_CODE_LENGTH: usize = 17;
+ const BROTLI_CODE_LENGTH_CODES: usize = BROTLI_REPEAT_ZERO_CODE_LENGTH + 1;
+ 
+-pub(crate) fn shannon_entropy(mut population: &[u32], size: usize) -> (floatX, usize) {
++pub(crate) fn shannon_entropy(mut population: &[u32], size: usize) -> (f64, usize) {
+     let mut sum: usize = 0;
+-    let mut retval: floatX = 0.0;
++    let mut retval: f64 = 0.0;
+ 
+     if (size & 1) != 0 && !population.is_empty() {
+         let p = population[0] as usize;
+         population = population.split_at(1).1;
+         sum = sum.wrapping_add(p);
+-        retval -= p as floatX * FastLog2u16(p as u16);
++        retval -= p as f64 * FastLog2f64(p as u64);
+     }
+     for pop_iter in population.split_at((size >> 1) << 1).0 {
+         let p = *pop_iter as usize;
+         sum = sum.wrapping_add(p);
+-        retval -= p as floatX * FastLog2u16(p as u16);
++        retval -= p as f64 * FastLog2f64(p as u64);
+     }
+     if sum != 0 {
+-        retval += sum as floatX * FastLog2(sum as u64); // not sure it's 16 bit
++        retval += sum as f64 * FastLog2f64(sum as u64); // not sure it's 16 bit
+     }
+ 
+     (retval, sum)
+ }
+ 
+ #[inline(always)]
+-pub fn BitsEntropy(population: &[u32], size: usize) -> floatX {
++pub fn BitsEntropy(population: &[u32], size: usize) -> f64 {
+     let (mut retval, sum) = shannon_entropy(population, size);
+-    if retval < sum as floatX {
+-        retval = sum as floatX;
++    if retval < sum as f64 {
++        retval = sum as f64;
+     }
+     retval
+ }
+@@ -46,19 +45,19 @@ fn CostComputation<T: SliceWrapper<Mem256i>>(
+     depth_histo: &mut [u32; BROTLI_CODE_LENGTH_CODES],
+     nnz_data: &T,
+     nnz: usize,
+-    _total_count: floatX,
+-    log2total: floatX,
+-) -> floatX {
+-    let mut bits: floatX = 0.0;
++    _total_count: f64,
++    log2total: f64,
++) -> f64 {
++    let mut bits: f64 = 0.0;
+     let mut max_depth: usize = 1;
+     for i in 0..nnz {
+         // Compute -log2(P(symbol)) = -log2(count(symbol)/total_count) =
+         //                            = log2(total_count) - log2(count(symbol))
+         let element = nnz_data.slice()[i >> 3][i & 7];
+-        let log2p = log2total - FastLog2u16(element as u16);
++        let log2p = log2total - FastLog2f64(element as u64);
+         // Approximate the bit depth by round(-log2(P(symbol)))
+         let depth = min((log2p + 0.5) as u8, 15u8);
+-        bits += (element as floatX) * log2p;
++        bits += (element as f64) * log2p;
+         if (depth as usize) > max_depth {
+             max_depth = depth as usize;
+         }
+@@ -66,7 +65,7 @@ fn CostComputation<T: SliceWrapper<Mem256i>>(
+     }
+ 
+     // Add the estimated encoding cost of the code length code histogram.
+-    bits += (18 + 2 * max_depth) as floatX;
++    bits += (18 + 2 * max_depth) as f64;
+     // Add the entropy of the code length code histogram.
+     bits += BitsEntropy(depth_histo, BROTLI_CODE_LENGTH_CODES);
+     //println_stderr!("{:?} {:?}", &depth_histo[..], bits);
+@@ -76,16 +75,16 @@ fn CostComputation<T: SliceWrapper<Mem256i>>(
+ pub fn BrotliPopulationCost<HistogramType: SliceWrapper<u32> + CostAccessors>(
+     histogram: &HistogramType,
+     nnz_data: &mut HistogramType::i32vec,
+-) -> floatX {
+-    static kOneSymbolHistogramCost: floatX = 12.0;
+-    static kTwoSymbolHistogramCost: floatX = 20.0;
+-    static kThreeSymbolHistogramCost: floatX = 28.0;
+-    static kFourSymbolHistogramCost: floatX = 37.0;
++) -> f64 {
++    static kOneSymbolHistogramCost: f64 = 12.0;
++    static kTwoSymbolHistogramCost: f64 = 20.0;
++    static kThreeSymbolHistogramCost: f64 = 28.0;
++    static kFourSymbolHistogramCost: f64 = 37.0;
+ 
+     let data_size: usize = histogram.slice().len();
+     let mut count = 0;
+     let mut s: [usize; 5] = [0; 5];
+-    let mut bits: floatX = 0.0;
++    let mut bits: f64 = 0.0;
+ 
+     if histogram.total_count() == 0 {
+         return kOneSymbolHistogramCost;
+@@ -101,15 +100,15 @@ pub fn BrotliPopulationCost<HistogramType: SliceWrapper<u32> + CostAccessors>(
+     }
+     match count {
+         1 => return kOneSymbolHistogramCost,
+-        2 => return kTwoSymbolHistogramCost + histogram.total_count() as floatX,
++        2 => return kTwoSymbolHistogramCost + histogram.total_count() as f64,
+         3 => {
+             let histo0: u32 = histogram.slice()[s[0]];
+             let histo1: u32 = histogram.slice()[s[1]];
+             let histo2: u32 = histogram.slice()[s[2]];
+             let histomax: u32 = max(histo0, max(histo1, histo2));
+             return kThreeSymbolHistogramCost
+-                + (2u32).wrapping_mul(histo0.wrapping_add(histo1).wrapping_add(histo2)) as floatX
+-                - histomax as floatX;
++                + (2u32).wrapping_mul(histo0.wrapping_add(histo1).wrapping_add(histo2)) as f64
++                - histomax as f64;
+         }
+         4 => {
+             let mut histo: [u32; 4] = [0; 4];
+@@ -127,9 +126,9 @@ pub fn BrotliPopulationCost<HistogramType: SliceWrapper<u32> + CostAccessors>(
+             let h23: u32 = histo[2].wrapping_add(histo[3]);
+             let histomax: u32 = max(h23, histo[0]);
+             return kFourSymbolHistogramCost
+-                + (3u32).wrapping_mul(h23) as floatX
+-                + (2u32).wrapping_mul(histo[0].wrapping_add(histo[1])) as floatX
+-                - histomax as floatX;
++                + (3u32).wrapping_mul(h23) as f64
++                + (2u32).wrapping_mul(histo[0].wrapping_add(histo[1])) as f64
++                - histomax as f64;
+         }
+         _ => {}
+     }
+@@ -138,8 +137,8 @@ pub fn BrotliPopulationCost<HistogramType: SliceWrapper<u32> + CostAccessors>(
+         // vectorization failed: it's faster to do things inline than split into two loops
+         let mut nnz: usize = 0;
+         let mut depth_histo = [0u32; 18];
+-        let total_count = histogram.total_count() as floatX;
+-        let log2total = FastLog2(histogram.total_count() as u64);
++        let total_count = histogram.total_count() as f64;
++        let log2total = FastLog2f64(histogram.total_count() as u64);
+         let mut i: usize = 0;
+         while i < data_size {
+             if histogram.slice()[i] > 0 {
+@@ -177,7 +176,7 @@ pub fn BrotliPopulationCost<HistogramType: SliceWrapper<u32> + CostAccessors>(
+     } else {
+         let mut max_depth: usize = 1;
+         let mut depth_histo = [0u32; 18];
+-        let log2total: floatX = FastLog2(histogram.total_count() as u64); // 64 bit here
++        let log2total: f64 = FastLog2f64(histogram.total_count() as u64); // 64 bit here
+         let mut reps: u32 = 0;
+         for histo in histogram.slice()[..data_size].iter() {
+             if *histo != 0 {
+@@ -194,9 +193,9 @@ pub fn BrotliPopulationCost<HistogramType: SliceWrapper<u32> + CostAccessors>(
+                     }
+                     reps = 0;
+                 }
+-                let log2p = log2total - FastLog2u16(*histo as u16);
++                let log2p = log2total - FastLog2f64(*histo as u64);
+                 let mut depth = (log2p + 0.5) as usize;
+-                bits += *histo as floatX * log2p;
++                bits += *histo as f64 * log2p;
+                 depth = min(depth, 15);
+                 max_depth = max(depth, max_depth);
+                 depth_histo[depth] += 1;
+@@ -204,7 +203,7 @@ pub fn BrotliPopulationCost<HistogramType: SliceWrapper<u32> + CostAccessors>(
+                 reps += 1;
+             }
+         }
+-        bits += (18usize).wrapping_add((2usize).wrapping_mul(max_depth)) as floatX;
++        bits += (18usize).wrapping_add((2usize).wrapping_mul(max_depth)) as f64;
+         bits += BitsEntropy(&depth_histo[..], 18);
+     }
+     bits
+diff --git a/src/enc/block_splitter.rs b/src/enc/block_splitter.rs
+index 3a852a4..67e7163 100644
+--- a/src/enc/block_splitter.rs
++++ b/src/enc/block_splitter.rs
+@@ -1,7 +1,5 @@
+ use core;
+ use core::cmp::{max, min};
+-#[cfg(feature = "simd")]
+-use core::simd::prelude::{SimdFloat, SimdPartialOrd};
+ 
+ use super::super::alloc::{Allocator, SliceWrapper, SliceWrapperMut};
+ use super::backward_references::BrotliEncoderParams;
+@@ -13,20 +11,19 @@ use super::histogram::{
+     ClearHistograms, CostAccessors, HistogramAddHistogram, HistogramAddItem, HistogramAddVector,
+     HistogramClear, HistogramCommand, HistogramDistance, HistogramLiteral,
+ };
+-use super::util::FastLog2;
+-use super::vectorization::{sum8i, v256, v256i, Mem256f};
++use super::util::FastLog2f64;
++use super::vectorization::Mem256f;
+ use crate::enc::combined_alloc::allocate;
+-use crate::enc::floatX;
+ 
+ static kMaxLiteralHistograms: usize = 100usize;
+ 
+ static kMaxCommandHistograms: usize = 50usize;
+ 
+-static kLiteralBlockSwitchCost: floatX = 28.1;
++static kLiteralBlockSwitchCost: f64 = 28.1;
+ 
+-static kCommandBlockSwitchCost: floatX = 13.5;
++static kCommandBlockSwitchCost: f64 = 13.5;
+ 
+-static kDistanceBlockSwitchCost: floatX = 14.6;
++static kDistanceBlockSwitchCost: f64 = 14.6;
+ 
+ static kLiteralStrideLength: usize = 70usize;
+ 
+@@ -44,46 +41,6 @@ static kIterMulForRefining: usize = 2usize;
+ 
+ static kMinItersForRefining: usize = 100usize;
+ 
+-#[inline(always)]
+-fn update_cost_and_signal(
+-    num_histograms32: u32,
+-    ix: usize,
+-    min_cost: floatX,
+-    block_switch_cost: floatX,
+-    cost: &mut [Mem256f],
+-    switch_signal: &mut [u8],
+-) {
+-    let ymm_min_cost = v256::splat(min_cost);
+-    let ymm_block_switch_cost = v256::splat(block_switch_cost);
+-    let ymm_and_mask = v256i::from([
+-        1 << 0,
+-        1 << 1,
+-        1 << 2,
+-        1 << 3,
+-        1 << 4,
+-        1 << 5,
+-        1 << 6,
+-        1 << 7,
+-    ]);
+-
+-    for (index, cost_it) in cost[..((num_histograms32 as usize + 7) >> 3)]
+-        .iter_mut()
+-        .enumerate()
+-    {
+-        let mut ymm_cost = *cost_it;
+-        let costk_minus_min_cost = ymm_cost - ymm_min_cost;
+-        let ymm_cmpge: v256i = costk_minus_min_cost
+-            .simd_ge(ymm_block_switch_cost)
+-            .to_simd();
+-        let ymm_bits = ymm_cmpge & ymm_and_mask;
+-        let result = sum8i(ymm_bits);
+-        //super::vectorization::sum8(ymm_bits) as u8;
+-        switch_signal[ix + index] |= result as u8;
+-        ymm_cost = costk_minus_min_cost.simd_min(ymm_block_switch_cost);
+-        *cost_it = Mem256f::from(ymm_cost);
+-        //println_stderr!("{:} ss {:} c {:?}", (index << 3) + 7, switch_signal[ix + index],*cost_it);
+-    }
+-}
+ fn CountLiterals(cmds: &[Command], num_commands: usize) -> usize {
+     let mut total_length: usize = 0usize;
+     for i in 0usize..num_commands {
+@@ -214,11 +171,11 @@ fn RefineEntropyCodes<
+     }
+ }
+ 
+-fn BitCost(count: usize) -> floatX {
++fn BitCost(count: usize) -> f64 {
+     if count == 0usize {
+         -2.0
+     } else {
+-        FastLog2(count as u64)
++        FastLog2f64(count as u64)
+     }
+ }
+ 
+@@ -228,11 +185,10 @@ fn FindBlocks<
+ >(
+     data: &[IntegerType],
+     length: usize,
+-    block_switch_bitcost: floatX,
++    block_switch_bitcost: f64,
+     num_histograms: usize,
+     histograms: &[HistogramType],
+-    insert_cost: &mut [floatX],
+-    cost: &mut [Mem256f],
++    insert_cost: &mut [u64],
+     switch_signal: &mut [u8],
+     block_id: &mut [u8],
+ ) -> usize
+@@ -252,83 +208,56 @@ where
+         }
+         return 1;
+     }
++    // PARITY: C keeps `insert_cost` and `cost` in double precision. `insert_cost`
++    // holds `f64` bit patterns (`f64::to_bits`), because `BrotliAlloc` has no
++    // `f64` allocator when `floatX` is `f32`.
+     for item in insert_cost[..(data_size * num_histograms)].iter_mut() {
+-        *item = 0.0;
++        *item = 0;
+     }
+     for i in 0usize..num_histograms {
+-        insert_cost[i] = FastLog2((histograms[i]).total_count() as u32 as (u64));
++        insert_cost[i] = FastLog2f64((histograms[i]).total_count() as u32 as (u64)).to_bits();
+     }
+     i = data_size;
+     while i != 0usize {
+         i = i.wrapping_sub(1);
+         for j in 0usize..num_histograms {
+-            insert_cost[i.wrapping_mul(num_histograms).wrapping_add(j)] =
+-                insert_cost[j] - BitCost((histograms[j]).slice()[i] as usize);
++            insert_cost[i.wrapping_mul(num_histograms).wrapping_add(j)] = (f64::from_bits(
++                insert_cost[j],
++            ) - BitCost((histograms[j]).slice()[i] as usize))
++            .to_bits();
+         }
+     }
+-    for item in cost.iter_mut() {
+-        *item = Mem256f::default();
+-    }
++    // PARITY: scalar f64 DP, same as C `FindBlocks`. Block ids are `u8`, so
++    // there are at most 256 histograms.
++    debug_assert!(num_histograms <= 256);
++    let mut costd = [0.0f64; 256];
++    let costd = &mut costd[..num_histograms];
+     for item in switch_signal[..(length * bitmaplen)].iter_mut() {
+         *item = 0;
+     }
+     for (byte_ix, data_byte_ix) in data[..length].iter().enumerate() {
+-        let block_id_ptr = &mut block_id[byte_ix];
+         let ix: usize = byte_ix.wrapping_mul(bitmaplen);
+         let insert_cost_ix: usize =
+             u64::from(data_byte_ix.clone()).wrapping_mul(num_histograms as u64) as usize;
+-        let mut min_cost: floatX = 1e38;
+-        let mut block_switch_cost: floatX = block_switch_bitcost;
+-        // main (vectorized) loop
+-        let insert_cost_slice = insert_cost.split_at(insert_cost_ix).1;
+-        for (v_index, cost_iter) in cost
+-            .split_at_mut(num_histograms >> 3)
+-            .0
+-            .iter_mut()
+-            .enumerate()
+-        {
+-            let base_index = v_index << 3;
+-            let mut local_insert_cost = [0.0; 8];
+-            local_insert_cost
+-                .clone_from_slice(insert_cost_slice.split_at(base_index).1.split_at(8).0);
+-            for sub_index in 0usize..8usize {
+-                cost_iter[sub_index] += local_insert_cost[sub_index];
+-                let final_cost = cost_iter[sub_index];
+-                if final_cost < min_cost {
+-                    min_cost = final_cost;
+-                    *block_id_ptr = (base_index + sub_index) as u8;
+-                }
+-            }
+-        }
+-        let vectorized_offset = ((num_histograms >> 3) << 3);
+-        let mut k = vectorized_offset;
+-        //remainder loop for
+-        for insert_cost_iter in insert_cost
+-            .split_at(insert_cost_ix + vectorized_offset)
+-            .1
+-            .split_at(num_histograms & 7)
+-            .0
+-            .iter()
+-        {
+-            let cost_iter = &mut cost[(k >> 3)];
+-            cost_iter[k & 7] += *insert_cost_iter;
+-            if cost_iter[k & 7] < min_cost {
+-                min_cost = cost_iter[k & 7];
+-                *block_id_ptr = k as u8;
++        let mut min_cost: f64 = 1e99;
++        let mut block_switch_cost: f64 = block_switch_bitcost;
++        for k in 0..num_histograms {
++            costd[k] += f64::from_bits(insert_cost[insert_cost_ix + k]);
++            if costd[k] < min_cost {
++                min_cost = costd[k];
++                block_id[byte_ix] = k as u8;
+             }
+-            k += 1;
+         }
+         if byte_ix < 2000usize {
+-            block_switch_cost *= (0.77 + 0.07 * (byte_ix as floatX) / 2000.0);
++            block_switch_cost *= 0.77 + (0.07 / 2000.0) * (byte_ix as f64);
++        }
++        for k in 0..num_histograms {
++            costd[k] -= min_cost;
++            if costd[k] >= block_switch_cost {
++                costd[k] = block_switch_cost;
++                switch_signal[ix + (k >> 3)] |= (1u32 << (k & 7)) as u8;
++            }
+         }
+-        update_cost_and_signal(
+-            num_histograms as u32,
+-            ix,
+-            min_cost,
+-            block_switch_cost,
+-            cost,
+-            switch_signal,
+-        );
+     }
+     {
+         let mut byte_ix: usize = length.wrapping_sub(1);
+@@ -592,7 +521,7 @@ fn ClusterBlocks<
+         for i in 0usize..num_blocks {
+             let mut histo: HistogramType = HistogramType::default();
+             let mut best_out: u32;
+-            let mut best_bits: floatX;
++            let mut best_bits: f64;
+             HistogramClear(&mut histo);
+             for _j in 0usize..block_lengths.slice()[i] as usize {
+                 HistogramAddItem(&mut histo, u64::from(data[pos].clone()) as usize);
+@@ -609,7 +538,7 @@ fn ClusterBlocks<
+                 scratch_space,
+             );
+             for j in 0usize..num_final_clusters {
+-                let cur_bits: floatX = BrotliHistogramBitCostDistance(
++                let cur_bits: f64 = BrotliHistogramBitCostDistance(
+                     &mut histo,
+                     &mut all_histograms.slice_mut()[(clusters.slice()[j] as usize)],
+                     scratch_space,
+@@ -696,7 +625,8 @@ fn SplitByteVector<
+     Alloc: alloc::Allocator<u8>
+         + alloc::Allocator<u16>
+         + alloc::Allocator<u32>
+-        + alloc::Allocator<floatX>
++        + alloc::Allocator<u64>
++        + alloc::Allocator<crate::enc::floatX>
+         + alloc::Allocator<Mem256f>
+         + alloc::Allocator<HistogramType>
+         + alloc::Allocator<HistogramPair>,
+@@ -708,7 +638,7 @@ fn SplitByteVector<
+     literals_per_histogram: usize,
+     max_histograms: usize,
+     sampling_stride_length: usize,
+-    block_switch_cost: floatX,
++    block_switch_cost: f64,
+     params: &BrotliEncoderParams,
+     scratch_space: &mut HistogramType::i32vec,
+     split: &mut BlockSplit<Alloc>,
+@@ -789,11 +719,10 @@ fn SplitByteVector<
+         let mut block_ids = allocate::<u8, _>(alloc, length);
+         let mut num_blocks: usize = 0usize;
+         let bitmaplen: usize = num_histograms.wrapping_add(7) >> 3;
+-        let mut insert_cost = allocate::<floatX, _>(alloc, data_size.wrapping_mul(num_histograms));
+-        let mut cost = allocate::<Mem256f, _>(alloc, ((num_histograms + 7) >> 3));
++        let mut insert_cost = allocate::<u64, _>(alloc, data_size.wrapping_mul(num_histograms));
+         let mut switch_signal = allocate::<u8, _>(alloc, length.wrapping_mul(bitmaplen));
+         let mut new_id = allocate::<u16, _>(alloc, num_histograms);
+-        let iters: usize = (if params.quality <= 11 { 3i32 } else { 10i32 }) as usize;
++        let iters: usize = (if params.quality < 11 { 3i32 } else { 10i32 }) as usize;
+         for _i in 0usize..iters {
+             num_blocks = FindBlocks(
+                 data,
+@@ -802,7 +731,6 @@ fn SplitByteVector<
+                 num_histograms,
+                 histograms.slice_mut(),
+                 insert_cost.slice_mut(),
+-                cost.slice_mut(),
+                 switch_signal.slice_mut(),
+                 block_ids.slice_mut(),
+             );
+@@ -820,8 +748,7 @@ fn SplitByteVector<
+                 histograms.slice_mut(),
+             );
+         }
+-        <Alloc as Allocator<floatX>>::free_cell(alloc, insert_cost);
+-        <Alloc as Allocator<Mem256f>>::free_cell(alloc, cost);
++        <Alloc as Allocator<u64>>::free_cell(alloc, insert_cost);
+         <Alloc as Allocator<u8>>::free_cell(alloc, switch_signal);
+         <Alloc as Allocator<u16>>::free_cell(alloc, new_id);
+         <Alloc as Allocator<HistogramType>>::free_cell(alloc, histograms);
+@@ -842,7 +769,8 @@ pub fn BrotliSplitBlock<
+     Alloc: alloc::Allocator<u8>
+         + alloc::Allocator<u16>
+         + alloc::Allocator<u32>
+-        + alloc::Allocator<floatX>
++        + alloc::Allocator<u64>
++        + alloc::Allocator<crate::enc::floatX>
+         + alloc::Allocator<Mem256f>
+         + alloc::Allocator<HistogramLiteral>
+         + alloc::Allocator<HistogramCommand>
+diff --git a/src/enc/cluster.rs b/src/enc/cluster.rs
+index bb86acd..7263bdf 100644
+--- a/src/enc/cluster.rs
++++ b/src/enc/cluster.rs
+@@ -7,15 +7,15 @@ use super::bit_cost::BrotliPopulationCost;
+ use super::histogram::{
+     CostAccessors, HistogramAddHistogram, HistogramClear, HistogramSelfAddHistogram,
+ };
+-use super::util::FastLog2;
++use super::util::FastLog2f64;
+ use crate::enc::combined_alloc::{alloc_or_default, allocate};
+ 
+ #[derive(Clone, Copy)]
+ pub struct HistogramPair {
+     pub idx1: u32,
+     pub idx2: u32,
+-    pub cost_combo: super::util::floatX,
+-    pub cost_diff: super::util::floatX,
++    pub cost_combo: f64,
++    pub cost_diff: f64,
+ }
+ 
+ impl Default for HistogramPair {
+@@ -31,11 +31,11 @@ impl Default for HistogramPair {
+ }
+ /* Returns entropy reduction of the context map when we combine two clusters. */
+ #[inline(always)]
+-fn ClusterCostDiff(size_a: usize, size_b: usize) -> super::util::floatX {
++fn ClusterCostDiff(size_a: usize, size_b: usize) -> f64 {
+     let size_c: usize = size_a.wrapping_add(size_b);
+-    size_a as (super::util::floatX) * FastLog2(size_a as u64)
+-        + size_b as (super::util::floatX) * FastLog2(size_b as u64)
+-        - size_c as (super::util::floatX) * FastLog2(size_c as u64)
++    size_a as (f64) * FastLog2f64(size_a as u64)
++        + size_b as (f64) * FastLog2f64(size_b as u64)
++        - size_c as (f64) * FastLog2f64(size_c as u64)
+ }
+ 
+ #[inline(always)]
+@@ -97,7 +97,7 @@ fn BrotliCompareAndPushToQueue<
+ 
+             let mut combo: HistogramType = out[idx1 as usize].clone();
+             HistogramAddHistogram(&mut combo, &out[idx2 as usize]);
+-            let cost_combo: super::util::floatX = BrotliPopulationCost(&combo, scratch_space);
++            let cost_combo: f64 = BrotliPopulationCost(&combo, scratch_space);
+             if cost_combo < threshold - p.cost_diff {
+                 p.cost_combo = cost_combo;
+                 is_good_pair = true;
+@@ -134,7 +134,7 @@ pub fn BrotliHistogramCombine<
+     max_num_pairs: usize,
+     scratch_space: &mut HistogramType::i32vec,
+ ) -> usize {
+-    let mut cost_diff_threshold: super::util::floatX = 0.0;
++    let mut cost_diff_threshold: f64 = 0.0;
+     let mut min_cluster_size: usize = 1;
+     let mut num_pairs: usize = 0usize;
+     {
+@@ -248,7 +248,7 @@ pub fn BrotliHistogramBitCostDistance<
+     histogram: &HistogramType,
+     candidate: &HistogramType,
+     scratch_space: &mut HistogramType::i32vec,
+-) -> super::util::floatX {
++) -> f64 {
+     if histogram.total_count() == 0usize {
+         0.0
+     } else {
+@@ -280,10 +280,10 @@ pub fn BrotliHistogramRemap<
+         } else {
+             symbols[i.wrapping_sub(1)]
+         };
+-        let mut best_bits: super::util::floatX =
++        let mut best_bits: f64 =
+             BrotliHistogramBitCostDistance(&inp[i], &mut out[(best_out as usize)], scratch_space);
+         for j in 0usize..num_clusters {
+-            let cur_bits: super::util::floatX = BrotliHistogramBitCostDistance(
++            let cur_bits: f64 = BrotliHistogramBitCostDistance(
+                 &inp[i],
+                 &mut out[(clusters[j] as usize)],
+                 scratch_space,
+diff --git a/src/enc/compress_fragment_two_pass.rs b/src/enc/compress_fragment_two_pass.rs
+index 8b8bbd0..0192e06 100644
+--- a/src/enc/compress_fragment_two_pass.rs
++++ b/src/enc/compress_fragment_two_pass.rs
+@@ -12,7 +12,7 @@ use super::static_dict::{
+     FindMatchLengthWithLimit, BROTLI_UNALIGNED_LOAD32, BROTLI_UNALIGNED_LOAD64,
+     BROTLI_UNALIGNED_STORE64,
+ };
+-use super::util::{floatX, Log2FloorNonZero};
++use super::util::Log2FloorNonZero;
+ static kCompressFragmentTwoPassBlockSize: usize = (1i32 << 17) as usize;
+ 
+ // returns number of commands inserted
+@@ -385,12 +385,12 @@ fn CreateCommands(
+ }
+ 
+ fn ShouldCompress(input: &[u8], input_size: usize, num_literals: usize) -> bool {
+-    let corpus_size = input_size as floatX;
+-    if (num_literals as floatX) < 0.98 * corpus_size {
++    let corpus_size = input_size as f64;
++    if (num_literals as f64) < 0.98 * corpus_size {
+         true
+     } else {
+         let mut literal_histo: [u32; 256] = [0; 256];
+-        let max_total_bit_cost: floatX = corpus_size * 8.0 * 0.98 / 43.0;
++        let max_total_bit_cost: f64 = corpus_size * 8.0 * 0.98 / 43.0;
+         let mut i: usize;
+         i = 0usize;
+         while i < input_size {
+diff --git a/src/enc/encode.rs b/src/enc/encode.rs
+index e0fa23c..680f4e9 100644
+--- a/src/enc/encode.rs
++++ b/src/enc/encode.rs
+@@ -1334,11 +1334,11 @@ fn should_compress(
+     num_commands: usize,
+ ) -> bool {
+     const K_SAMPLE_RATE: u32 = 13;
+-    const K_MIN_ENTROPY: floatX = 7.92;
++    const K_MIN_ENTROPY: f64 = 7.92;
+ 
+-    if num_commands < (bytes >> 8) + 2 && num_literals as floatX > 0.99 * bytes as floatX {
++    if num_commands < (bytes >> 8) + 2 && num_literals as f64 > 0.99 * bytes as f64 {
+         let mut literal_histo = [0u32; 256];
+-        let bit_cost_threshold = (bytes as floatX) * K_MIN_ENTROPY / (K_SAMPLE_RATE as floatX);
++        let bit_cost_threshold = (bytes as f64) * K_MIN_ENTROPY / (K_SAMPLE_RATE as f64);
+         let t = bytes
+             .wrapping_add(K_SAMPLE_RATE as usize)
+             .wrapping_sub(1)
+@@ -1740,7 +1740,7 @@ fn ChooseContextMap(
+     let mut two_prefix_histo = [0u32; 6];
+ 
+     let mut i: usize;
+-    let mut entropy = [0.0 as floatX; 4];
++    let mut entropy = [0.0 as f64; 4];
+     i = 0usize;
+     while i < 9usize {
+         {
+@@ -1767,7 +1767,7 @@ fn ChooseContextMap(
+     let total: usize = monogram_histo[0]
+         .wrapping_add(monogram_histo[1])
+         .wrapping_add(monogram_histo[2]) as usize;
+-    entropy[0] = 1.0 / (total as floatX);
++    entropy[0] = 1.0 / (total as f64);
+     entropy[1] *= entropy[0];
+     entropy[2] *= entropy[0];
+     entropy[3] *= entropy[0];
+@@ -1828,7 +1828,7 @@ fn ShouldUseComplexStaticContextMap(
+         let mut combined_histo: [u32; 32] = [0; 32];
+         let mut context_histo: [[u32; 32]; 13] = [[0; 32]; 13];
+         let mut total = 0u32;
+-        let mut entropy = [0.0 as floatX; 3];
++        let mut entropy = [0.0 as f64; 3];
+         let utf8_lut = BROTLI_CONTEXT_LUT(ContextType::CONTEXT_UTF8);
+         while start_pos + 64 <= end_pos {
+             let stride_end_pos = start_pos + 64;
+@@ -1856,7 +1856,7 @@ fn ShouldUseComplexStaticContextMap(
+             assert!(i < 13);
+             entropy[2] += shannon_entropy(&context_histo[i][..], 32).0;
+         }
+-        entropy[0] = 1.0 / (total as floatX);
++        entropy[0] = 1.0 / (total as f64);
+         entropy[1] *= entropy[0];
+         entropy[2] *= entropy[0];
+         /* The triggering heuristics below were tuned by compressing the individual
+diff --git a/src/enc/histogram.rs b/src/enc/histogram.rs
+index 30cb03b..159b0fd 100644
+--- a/src/enc/histogram.rs
++++ b/src/enc/histogram.rs
+@@ -8,14 +8,14 @@ use super::command::Command;
+ use super::constants::{
+     kSigned3BitContextLookup, kUTF8ContextLookup, BROTLI_NUM_HISTOGRAM_DISTANCE_SYMBOLS,
+ };
+-use super::util::floatX;
++
+ use super::vectorization::Mem256i;
+ 
+ //#[derive(Clone)] clone is broken for arrays > 32
+ pub struct HistogramLiteral {
+     pub data_: [u32; 256],
+     pub total_count_: usize,
+-    pub bit_cost_: floatX,
++    pub bit_cost_: f64,
+ }
+ impl Clone for HistogramLiteral {
+     #[inline(always)]
+@@ -41,7 +41,7 @@ impl Default for HistogramLiteral {
+ pub struct HistogramCommand {
+     pub data_: [u32; 704],
+     pub total_count_: usize,
+-    pub bit_cost_: floatX,
++    pub bit_cost_: f64,
+ }
+ impl Clone for HistogramCommand {
+     #[inline(always)]
+@@ -68,7 +68,7 @@ impl Default for HistogramCommand {
+ pub struct HistogramDistance {
+     pub data_: [u32; BROTLI_NUM_HISTOGRAM_DISTANCE_SYMBOLS],
+     pub total_count_: usize,
+-    pub bit_cost_: floatX,
++    pub bit_cost_: f64,
+ }
+ impl Clone for HistogramDistance {
+     fn clone(&self) -> HistogramDistance {
+@@ -93,8 +93,8 @@ pub trait CostAccessors {
+     type i32vec: Sized + SliceWrapper<Mem256i> + SliceWrapperMut<Mem256i>;
+     fn make_nnz_storage() -> Self::i32vec;
+     fn total_count(&self) -> usize;
+-    fn bit_cost(&self) -> floatX;
+-    fn set_bit_cost(&mut self, cost: floatX);
++    fn bit_cost(&self) -> f64;
++    fn set_bit_cost(&mut self, cost: f64);
+     fn set_total_count(&mut self, count: usize);
+ }
+ impl SliceWrapper<u32> for HistogramLiteral {
+@@ -207,11 +207,11 @@ impl CostAccessors for HistogramLiteral {
+         self.total_count_
+     }
+     #[inline(always)]
+-    fn bit_cost(&self) -> floatX {
++    fn bit_cost(&self) -> f64 {
+         self.bit_cost_
+     }
+     #[inline(always)]
+-    fn set_bit_cost(&mut self, data: floatX) {
++    fn set_bit_cost(&mut self, data: f64) {
+         self.bit_cost_ = data;
+     }
+     #[inline(always)]
+@@ -249,11 +249,11 @@ impl CostAccessors for HistogramCommand {
+         self.total_count_
+     }
+     #[inline(always)]
+-    fn bit_cost(&self) -> floatX {
++    fn bit_cost(&self) -> f64 {
+         self.bit_cost_
+     }
+     #[inline(always)]
+-    fn set_bit_cost(&mut self, data: floatX) {
++    fn set_bit_cost(&mut self, data: f64) {
+         self.bit_cost_ = data;
+     }
+     #[inline(always)]
+@@ -292,11 +292,11 @@ impl CostAccessors for HistogramDistance {
+         self.total_count_
+     }
+     #[inline(always)]
+-    fn bit_cost(&self) -> floatX {
++    fn bit_cost(&self) -> f64 {
+         self.bit_cost_
+     }
+     #[inline(always)]
+-    fn set_bit_cost(&mut self, data: floatX) {
++    fn set_bit_cost(&mut self, data: f64) {
+         self.bit_cost_ = data;
+     }
+     #[inline(always)]
+diff --git a/src/enc/metablock.rs b/src/enc/metablock.rs
+index 2c7484a..2a6d76b 100644
+--- a/src/enc/metablock.rs
++++ b/src/enc/metablock.rs
+@@ -23,7 +23,6 @@ use super::histogram::{
+     HistogramLiteral,
+ };
+ use crate::enc::combined_alloc::{alloc_default, allocate};
+-use crate::enc::floatX;
+ 
+ pub fn BrotliInitDistanceParams(params: &mut BrotliEncoderParams, npostfix: u32, ndirect: u32) {
+     let dist_params = &mut params.dist;
+@@ -309,7 +308,7 @@ pub struct BlockSplitter<'a, HistogramType:SliceWrapper<u32>+SliceWrapperMut<u32
+ pub struct BlockSplitter {
+     pub alphabet_size_: usize,
+     pub min_block_size_: usize,
+-    pub split_threshold_: floatX,
++    pub split_threshold_: f64,
+     pub num_blocks_: usize,
+     //  pub split_: &'a mut BlockSplit<AllocU8, AllocU32>,
+     //  pub histograms_: AllocHT::AllocatedMemory, // FIXME: pull this one out at the end
+@@ -318,7 +317,7 @@ pub struct BlockSplitter {
+     pub block_size_: usize,
+     pub curr_histogram_ix_: usize,
+     pub last_histogram_ix_: [usize; 2],
+-    pub last_entropy_: [floatX; 2],
++    pub last_entropy_: [f64; 2],
+     pub merge_last_count_: usize,
+ }
+ 
+@@ -327,7 +326,7 @@ pub struct ContextBlockSplitter {
+     pub num_contexts_: usize,
+     pub max_block_types_: usize,
+     pub min_block_size_: usize,
+-    pub split_threshold_: floatX,
++    pub split_threshold_: f64,
+     pub num_blocks_: usize,
+     //  pub split_: &'a mut BlockSplit<AllocU8, AllocU32>,
+     //  pub histograms_: AllocHL::AllocatedMemory,
+@@ -336,7 +335,7 @@ pub struct ContextBlockSplitter {
+     pub block_size_: usize,
+     pub curr_histogram_ix_: usize,
+     pub last_histogram_ix_: [usize; 2],
+-    pub last_entropy_: [floatX; 2 * BROTLI_MAX_STATIC_CONTEXTS],
++    pub last_entropy_: [f64; 2 * BROTLI_MAX_STATIC_CONTEXTS],
+     pub merge_last_count_: usize,
+ }
+ 
+@@ -350,7 +349,7 @@ enum LitBlocks {
+ pub struct BlockSplitterCommand {
+   pub alphabet_size_: usize,
+   pub min_block_size_: usize,
+-  pub split_threshold_: floatX,
++  pub split_threshold_: f64,
+   pub num_blocks_: usize,
+   pub split_: *mut BlockSplit,
+   pub histograms_: *mut HistogramCommand,
+@@ -359,7 +358,7 @@ pub struct BlockSplitterCommand {
+   pub block_size_: usize,
+   pub curr_histogram_ix_: usize,
+   pub last_histogram_ix_: [usize; 2],
+-  pub last_entropy_: [floatX; 2],
++  pub last_entropy_: [f64; 2],
+   pub merge_last_count_: usize,
+ }
+ 
+@@ -368,7 +367,7 @@ pub struct BlockSplitterCommand {
+ pub struct BlockSplitterDistance {
+   pub alphabet_size_: usize,
+   pub min_block_size_: usize,
+-  pub split_threshold_: floatX,
++  pub split_threshold_: f64,
+   pub num_blocks_: usize,
+   pub split_: *mut BlockSplit,
+   pub histograms_: *mut HistogramDistance,
+@@ -377,7 +376,7 @@ pub struct BlockSplitterDistance {
+   pub block_size_: usize,
+   pub curr_histogram_ix_: usize,
+   pub last_histogram_ix_: [usize; 2],
+-  pub last_entropy_: [floatX; 2],
++  pub last_entropy_: [f64; 2],
+   pub merge_last_count_: usize,
+ }
+ */
+@@ -389,7 +388,7 @@ fn InitBlockSplitter<
+     alloc: &mut Alloc,
+     alphabet_size: usize,
+     min_block_size: usize,
+-    split_threshold: floatX,
++    split_threshold: f64,
+     num_symbols: usize,
+     split: &mut BlockSplit<Alloc>,
+     histograms: &mut <Alloc as Allocator<HistogramType>>::AllocatedMemory,
+@@ -471,7 +470,7 @@ fn InitContextBlockSplitter<
+     alphabet_size: usize,
+     num_contexts: usize,
+     min_block_size: usize,
+-    split_threshold: floatX,
++    split_threshold: f64,
+     num_symbols: usize,
+     split: &mut BlockSplit<Alloc>,
+     histograms: &mut <Alloc as Allocator<HistogramLiteral>>::AllocatedMemory,
+@@ -581,8 +580,8 @@ fn BlockSplitterFinishBlock<
+             histograms[xself.curr_histogram_ix_].clone(),
+         ];
+ 
+-        let mut combined_entropy: [floatX; 2] = [0.0, 0.0];
+-        let mut diff: [floatX; 2] = [0.0, 0.0];
++        let mut combined_entropy: [f64; 2] = [0.0, 0.0];
++        let mut diff: [f64; 2] = [0.0, 0.0];
+         for j in 0..2 {
+             let last_histogram_ix: usize = xself.last_histogram_ix_[j];
+             HistogramAddHistogram(&mut combined_histo[j], &histograms[last_histogram_ix]);
+-- 
+2.56.0.317.g454f8302e1-goog
+

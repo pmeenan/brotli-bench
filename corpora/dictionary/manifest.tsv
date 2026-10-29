@@ -1,0 +1,16 @@
+# Compression-dictionary-transport test cases (raw / stand-alone brotli
+# dictionaries). Format: name<TAB>dictionary_path<TAB>input_path, paths
+# relative to the repo root. Lines starting with '#' are comments.
+# See corpora/SOURCES.md for provenance and expected sizes.
+#
+# Delta updates: dictionary = previous version of the same file flavor.
+jquery-3.6.4-to-3.7.1.min.js	corpora/dictionary/jquery-3.6.4.min.js	corpora/jquery-3.7.1.min.js
+react-dom-18.2.0-to-18.3.1.production.min.js	corpora/dictionary/react-dom-18.2.0.production.min.js	corpora/react-dom-18.3.1.production.min.js
+lodash-4.17.20-to-4.17.21.min.js	corpora/dictionary/lodash-4.17.20.min.js	corpora/lodash-4.17.21.min.js
+vue-3.3.13-to-3.4.38.global.prod.js	corpora/dictionary/vue-3.3.13.global.prod.js	corpora/vue-3.4.38.global.prod.js
+bootstrap-5.3.2-to-5.3.3.min.css	corpora/dictionary/bootstrap-5.3.2.min.css	corpora/bootstrap-5.3.3.min.css
+# Stand-alone 64KB dictionary trained on 20 other Wikipedia pages; inputs are
+# held-out pages (not in the training set).
+wiki-html-Brotli	corpora/dictionary/wiki-html.dict	corpora/wiki-Brotli.html
+wiki-html-Huffman_coding	corpora/dictionary/wiki-html.dict	corpora/wiki-Huffman_coding.html
+wiki-html-Espresso	corpora/dictionary/wiki-html.dict	corpora/wiki-Espresso.html

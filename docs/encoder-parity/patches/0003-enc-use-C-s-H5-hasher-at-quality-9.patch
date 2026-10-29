@@ -1,0 +1,35 @@
+From f62d1c6f84629989a68e4fa73d5edbfe953a704f Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:44:56 +0000
+Subject: [PATCH 3/8] enc: use C's H5 hasher at quality 9
+
+C's ChooseHasher picks H5 (block_bits 8, bucket_bits 15, 16 last
+distances) at q9 (H6 for large inputs, H42 for lgwin <= 16). Rust used its
+own H9 hasher, which has no C equivalent.
+
+Keep H9 for the Rust-only q9_5 mode, and for lgwin <= 16: Rust has no
+H40/H41/H42 (BrotliMakeHasher falls back to H6), and H6 compresses worse
+than H9 there (alice29 q9 lgwin16: H9 51737, H6 52110, C 51695).
+---
+ src/enc/encode.rs | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/enc/encode.rs b/src/enc/encode.rs
+index 6738e85..e0fa23c 100644
+--- a/src/enc/encode.rs
++++ b/src/enc/encode.rs
+@@ -842,7 +842,10 @@ fn ChooseHasher(params: &mut BrotliEncoderParams) {
+         hparams.block_bits = H9_BLOCK_BITS as i32;
+         hparams.bucket_bits = H9_BUCKET_BITS as i32;
+         hparams.hash_len = 4;
+-    } else if params.quality == 9 {
++    } else if params.quality == 9 && (params.q9_5 || params.lgwin <= 16) {
++        // PARITY: C uses H5 (or H6) at q9. Keep Rust's H9 for the Rust-specific
++        // "q9.5" mode, and for lgwin <= 16, where C uses H42, which Rust doesn't
++        // implement (it would fall back to H6 and compress worse than H9).
+         hparams.type_ = 9;
+         hparams.num_last_distances_to_check = H9_NUM_LAST_DISTANCES_TO_CHECK as i32;
+         hparams.block_bits = H9_BLOCK_BITS as i32;
+-- 
+2.56.0.317.g454f8302e1-goog
+

@@ -1,0 +1,229 @@
+From 8e9a0e70291873691878a5bbba985f2b34e90bbd Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:44:31 +0000
+Subject: [PATCH 2/8] enc: match C's quickly-hasher (H2/H3/H4/H54) behaviour
+
+- Use C's current kHashMul64 (0x1FE35A7BD3579BD3, brotli 117b68b) in
+  the H2/H3/H4/H54 HashBytes.
+- H2: only accept the bucket match if it beats out.score (kMinScore),
+  otherwise fall through to the static dictionary like C.
+- Bucket-sweep slot layout from brotli #749: slots 8 apart, wrapped by
+  BUCKET_MASK, written at (key + (ix & SWEEP_MASK)); store unmasked ix in
+  StoreRangeOptBasic.
+- Random-heuristics jump near the end of a block: clamp to
+  pos_end - kMargin and keep searching instead of emitting the tail as
+  literals.
+---
+ src/enc/backward_references/mod.rs | 116 +++++++++++++++++++----------
+ 1 file changed, 75 insertions(+), 41 deletions(-)
+
+diff --git a/src/enc/backward_references/mod.rs b/src/enc/backward_references/mod.rs
+index 92bbd5f..e4433ff 100644
+--- a/src/enc/backward_references/mod.rs
++++ b/src/enc/backward_references/mod.rs
+@@ -251,6 +251,18 @@ impl<A: SliceWrapperMut<u32> + SliceWrapper<u32> + BasicHashComputer> PartialEq<
+ }
+ 
+ impl<T: SliceWrapperMut<u32> + SliceWrapper<u32> + BasicHashComputer> BasicHasher<T> {
++    // PARITY: C (since #749) spreads a key's `BUCKET_SWEEP` slots 8 apart and
++    // wraps them with `BUCKET_MASK`; the slot written is chosen by `ix & SWEEP_MASK`.
++    #[inline(always)]
++    fn sweep_slot(&self, key: usize, ix: usize) -> usize {
++        let sweep = self.buckets_.BUCKET_SWEEP() as usize;
++        if sweep == 1 {
++            key
++        } else {
++            let bucket_mask = (1usize << self.buckets_.BUCKET_BITS()) - 1;
++            (key + (ix & ((sweep - 1) << 3))) & bucket_mask
++        }
++    }
+     fn StoreRangeOptBasic(
+         &mut self,
+         data: &[u8],
+@@ -262,21 +274,21 @@ impl<T: SliceWrapperMut<u32> + SliceWrapper<u32> + BasicHashComputer> BasicHashe
+         if ix_end >= ix_start + lookahead * 2 {
+             let chunk_count = (ix_end - ix_start) / 4;
+             for chunk_id in 0..chunk_count {
+-                let i = (ix_start + chunk_id * 4) & mask;
++                let ix = ix_start + chunk_id * 4;
++                let i = ix & mask;
+                 let word11 = data.split_at(i).1.split_at(11).0;
+                 let mixed0 = self.HashBytes(word11);
+                 let mixed1 = self.HashBytes(word11.split_at(1).1);
+                 let mixed2 = self.HashBytes(word11.split_at(2).1);
+                 let mixed3 = self.HashBytes(word11.split_at(3).1);
+-                let off: u32 = (i >> 3).wrapping_rem(self.buckets_.BUCKET_SWEEP() as usize) as u32;
+-                let offset0: usize = mixed0 + off as usize;
+-                let offset1: usize = mixed1 + off as usize;
+-                let offset2: usize = mixed2 + off as usize;
+-                let offset3: usize = mixed3 + off as usize;
+-                self.buckets_.slice_mut()[offset0] = i as u32;
+-                self.buckets_.slice_mut()[offset1] = i as u32 + 1;
+-                self.buckets_.slice_mut()[offset2] = i as u32 + 2;
+-                self.buckets_.slice_mut()[offset3] = i as u32 + 3;
++                let offset0: usize = self.sweep_slot(mixed0, ix);
++                let offset1: usize = self.sweep_slot(mixed1, ix + 1);
++                let offset2: usize = self.sweep_slot(mixed2, ix + 2);
++                let offset3: usize = self.sweep_slot(mixed3, ix + 3);
++                self.buckets_.slice_mut()[offset0] = ix as u32;
++                self.buckets_.slice_mut()[offset1] = ix as u32 + 1;
++                self.buckets_.slice_mut()[offset2] = ix as u32 + 2;
++                self.buckets_.slice_mut()[offset3] = ix as u32 + 3;
+             }
+             return ix_start + chunk_count * 4;
+         }
+@@ -320,9 +332,9 @@ impl<T: SliceWrapperMut<u32> + SliceWrapper<u32> + BasicHashComputer> AnyHasher
+     }
+     fn Store(&mut self, data: &[u8], mask: usize, ix: usize) {
+         let (_, data_window) = data.split_at((ix & mask));
+-        let key: u32 = self.HashBytes(data_window) as u32;
+-        let off: u32 = (ix >> 3).wrapping_rem(self.buckets_.BUCKET_SWEEP() as usize) as u32;
+-        self.buckets_.slice_mut()[key.wrapping_add(off) as usize] = ix as u32;
++        let key = self.HashBytes(data_window);
++        let slot = self.sweep_slot(key, ix);
++        self.buckets_.slice_mut()[slot] = ix as u32;
+     }
+     fn StoreRange(&mut self, data: &[u8], mask: usize, ix_start: usize, ix_end: usize) {
+         for i in self.StoreRangeOptBasic(data, mask, ix_start, ix_end)..ix_end {
+@@ -341,8 +353,9 @@ impl<T: SliceWrapperMut<u32> + SliceWrapper<u32> + BasicHashComputer> AnyHasher
+             for i in 0..input_size {
+                 let key = self.HashBytes(&data[i..]);
+                 let bs = self.buckets_.BUCKET_SWEEP() as usize;
+-                for item in self.buckets_.slice_mut()[key..(key + bs)].iter_mut() {
+-                    *item = 0;
++                let bucket_mask = (1usize << self.buckets_.BUCKET_BITS()) - 1;
++                for j in 0..bs {
++                    self.buckets_.slice_mut()[(key + (j << 3)) & bucket_mask] = 0;
+                 }
+             }
+         } else {
+@@ -422,16 +435,20 @@ impl<T: SliceWrapperMut<u32> + SliceWrapper<u32> + BasicHashComputer> AnyHasher
+                 FindMatchLengthWithLimitMin4(&data[prev_ix..], &data[cur_ix_masked..], max_length);
+             if unbroken_len != 0 {
+                 let len = fix_unbroken_len(unbroken_len, prev_ix, cur_ix_masked, ring_buffer_break);
+-                out.len = len;
+-                out.distance = backward;
+-                out.score = BackwardReferenceScore(len, backward, opts);
+-                return true;
++                // PARITY: C only accepts the bucket match if it beats `out.score`
++                // and otherwise falls through to the static dictionary search.
++                let score = BackwardReferenceScore(len, backward, opts);
++                if best_score < score {
++                    out.len = len;
++                    out.distance = backward;
++                    out.score = score;
++                    return true;
++                }
+             }
+         } else {
+-            for prev_ix_ref in
+-                self.buckets_.slice().split_at(key as usize).1[..bucket_sweep as usize].iter()
+-            {
+-                let mut prev_ix = *prev_ix_ref as usize;
++            let bucket_mask = (1usize << self.buckets_.BUCKET_BITS()) - 1;
++            for i in 0..bucket_sweep as usize {
++                let mut prev_ix = self.buckets_.slice()[(key as usize + (i << 3)) & bucket_mask] as usize;
+                 let backward: usize = cur_ix.wrapping_sub(prev_ix);
+                 prev_ix &= ring_buffer_mask as u32 as usize;
+                 if compare_char != data[prev_ix.wrapping_add(best_len)] as i32 {
+@@ -475,16 +492,15 @@ impl<T: SliceWrapperMut<u32> + SliceWrapper<u32> + BasicHashComputer> AnyHasher
+                 true,
+             );
+         }
+-        self.buckets_.slice_mut()
+-            [(key as usize).wrapping_add((cur_ix >> 3).wrapping_rem(bucket_sweep as usize))] =
+-            cur_ix as u32;
++        let slot = self.sweep_slot(key as usize, cur_ix);
++        self.buckets_.slice_mut()[slot] = cur_ix as u32;
+         is_match_found
+     }
+ }
+ impl<AllocU32: alloc::Allocator<u32>> BasicHashComputer for H2Sub<AllocU32> {
+     fn HashBytes(&self, data: &[u8]) -> u32 {
+         let h: u64 =
+-            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 5i32)).wrapping_mul(kHashMul64);
++            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 5i32)).wrapping_mul(kHashMul64Long);
+         (h >> (64i32 - 16i32)) as u32
+     }
+     fn BUCKET_BITS(&self) -> i32 {
+@@ -532,7 +548,7 @@ impl<AllocU32: alloc::Allocator<u32>> BasicHashComputer for H3Sub<AllocU32> {
+     }
+     fn HashBytes(&self, data: &[u8]) -> u32 {
+         let h: u64 =
+-            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 5i32)).wrapping_mul(kHashMul64);
++            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 5i32)).wrapping_mul(kHashMul64Long);
+         (h >> (64i32 - 16i32)) as u32
+     }
+ }
+@@ -551,7 +567,7 @@ impl<AllocU32: alloc::Allocator<u32>> BasicHashComputer for H4Sub<AllocU32> {
+     }
+     fn HashBytes(&self, data: &[u8]) -> u32 {
+         let h: u64 =
+-            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 5i32)).wrapping_mul(kHashMul64);
++            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 5i32)).wrapping_mul(kHashMul64Long);
+         (h >> (64i32 - 17i32)) as u32
+     }
+ }
+@@ -580,7 +596,7 @@ impl<AllocU32: alloc::Allocator<u32>> BasicHashComputer for H54Sub<AllocU32> {
+     }
+     fn HashBytes(&self, data: &[u8]) -> u32 {
+         let h: u64 =
+-            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 7i32)).wrapping_mul(kHashMul64);
++            (BROTLI_UNALIGNED_LOAD64(data) << (64i32 - 8i32 * 7i32)).wrapping_mul(kHashMul64Long);
+         (h >> (64i32 - 20i32)) as u32
+     }
+ }
+@@ -2538,21 +2554,39 @@ fn CreateBackwardReferences<AH: AnyHasher>(
+             position = position.wrapping_add(1);
+ 
+             if position > apply_random_heuristics {
+-                let kMargin: usize = max(hasher.StoreLookahead().wrapping_sub(1), 4);
+-                if position.wrapping_add(16) >= pos_end.wrapping_sub(kMargin) {
+-                    insert_length = insert_length.wrapping_add(pos_end - position);
+-                    position = pos_end;
+-                } else if position
++                // PARITY: C clamps the sparse-store jump to `pos_end - kMargin`
++                // and keeps searching, instead of emitting the rest as literals.
++                if position
+                     > apply_random_heuristics
+                         .wrapping_add((4usize).wrapping_mul(random_heuristics_window_size))
+                 {
+-                    hasher.Store4Vec4(ringbuffer, ringbuffer_mask, position);
+-                    insert_length = insert_length.wrapping_add(16);
+-                    position = position.wrapping_add(16);
++                    let kMargin: usize = max(hasher.StoreLookahead().wrapping_sub(1), 4);
++                    let pos_jump = min(position + 16, pos_end.wrapping_sub(kMargin));
++                    if pos_jump == position + 16 {
++                        hasher.Store4Vec4(ringbuffer, ringbuffer_mask, position);
++                        insert_length = insert_length.wrapping_add(16);
++                        position = position.wrapping_add(16);
++                    } else {
++                        while position < pos_jump {
++                            hasher.Store(ringbuffer, ringbuffer_mask, position);
++                            insert_length = insert_length.wrapping_add(4);
++                            position = position.wrapping_add(4);
++                        }
++                    }
+                 } else {
+-                    hasher.StoreEvenVec4(ringbuffer, ringbuffer_mask, position);
+-                    insert_length = insert_length.wrapping_add(8);
+-                    position = position.wrapping_add(8);
++                    let kMargin: usize = max(hasher.StoreLookahead().wrapping_sub(1), 2);
++                    let pos_jump = min(position + 8, pos_end.wrapping_sub(kMargin));
++                    if pos_jump == position + 8 {
++                        hasher.StoreEvenVec4(ringbuffer, ringbuffer_mask, position);
++                        insert_length = insert_length.wrapping_add(8);
++                        position = position.wrapping_add(8);
++                    } else {
++                        while position < pos_jump {
++                            hasher.Store(ringbuffer, ringbuffer_mask, position);
++                            insert_length = insert_length.wrapping_add(2);
++                            position = position.wrapping_add(2);
++                        }
++                    }
+                 }
+             }
+         }
+-- 
+2.56.0.317.g454f8302e1-goog
+

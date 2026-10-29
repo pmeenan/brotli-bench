@@ -1,0 +1,34 @@
+From a75ef1385dcdbb963ce0509cbccc2032887f81e7 Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:47:37 +0000
+Subject: [PATCH 7/8] enc: don't force catable/appendable when q0/q1 ignore a
+ custom dictionary
+
+set_custom_dictionary ignores the dictionary at q0/q1 (like C), but also
+set catable/appendable, which disabled the compress_stream_fast path,
+forced a 2-byte uncompressed meta-block and a trailing empty meta-block.
+C's q0/q1 output with a dictionary is identical to its output without
+one; now Rust's is too.
+---
+ src/enc/encode.rs | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/enc/encode.rs b/src/enc/encode.rs
+index 680f4e9..876927e 100644
+--- a/src/enc/encode.rs
++++ b/src/enc/encode.rs
+@@ -1238,8 +1238,9 @@ impl<Alloc: BrotliAlloc> BrotliEncoderStateStruct<Alloc> {
+             return;
+         }
+         if dict_size == 0 || self.params.quality == 0 || self.params.quality == 1 || size <= 1 {
+-            self.params.catable = true; // don't risk a too-short dictionary
+-            self.params.appendable = true; // don't risk a too-short dictionary
++            // PARITY: like C, q0/q1 ignore the dictionary entirely. Don't switch
++            // to `catable`/`appendable` here: that disables the q0/q1 fast path
++            // and changes the stream layout.
+             return;
+         }
+         self.custom_dictionary = true;
+-- 
+2.56.0.317.g454f8302e1-goog
+

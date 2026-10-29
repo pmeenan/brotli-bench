@@ -1,0 +1,38 @@
+From 88e8e0920dfa364417ad28330cdf979d6219970c Mon Sep 17 00:00:00 2001
+From: Patrick Meenan <pmeenan@chromium.org>
+Date: Thu, 29 Oct 2026 20:47:58 +0000
+Subject: [PATCH 8/8] enc: clamp FindAllMatchesH10 short-range matches at the
+ dictionary end
+
+The short-distance linear scan in FindAllMatchesH10 (q10/q11) was the
+only match finder not wrapped in fix_unbroken_len, so it could emit
+copies spanning from a custom dictionary into the input. Both the C and
+Rust decoders reject such streams.
+---
+ src/enc/backward_references/hq.rs | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/enc/backward_references/hq.rs b/src/enc/backward_references/hq.rs
+index cb77900..86f107d 100644
+--- a/src/enc/backward_references/hq.rs
++++ b/src/enc/backward_references/hq.rs
+@@ -344,8 +344,14 @@ where
+         if data[cur_ix_masked] == data[prev_ix]
+             && data[cur_ix_masked.wrapping_add(1)] == data[prev_ix.wrapping_add(1)]
+         {
+-            let len =
+-                FindMatchLengthWithLimit(&data[prev_ix..], &data[cur_ix_masked..], max_length);
++            // A copy must not run from a custom dictionary into the input;
++            // decoders reject it.
++            let len = fix_unbroken_len(
++                FindMatchLengthWithLimit(&data[prev_ix..], &data[cur_ix_masked..], max_length),
++                prev_ix,
++                cur_ix_masked,
++                ring_buffer_break,
++            );
+             if len > best_len {
+                 best_len = len;
+                 BackwardMatchMut(&mut matches[matches_offset]).init(backward, len);
+-- 
+2.56.0.317.g454f8302e1-goog
+

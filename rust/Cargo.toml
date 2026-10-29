@@ -1,0 +1,38 @@
+# Wrapper crate that builds the Rust brotli C FFI (`vendor/rust-brotli/c`)
+# as a single static library against the submodule sources.
+#
+# All build plumbing (crates.io patches, release profile) lives here so the
+# `vendor/` forks only ever contain real, upstreamable changes. `Cargo.lock`
+# next to this file is committed to pin third-party dependency versions.
+
+[package]
+name = "brotli-bench-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+brotli-ffi = { path = "../vendor/rust-brotli/c" }
+
+# `brotli-ffi` depends on `brotli` (and transitively `brotli-decompressor`)
+# by crates.io version; redirect both to the submodule forks.
+[patch.crates-io]
+brotli = { path = "../vendor/rust-brotli" }
+brotli-decompressor = { path = "../vendor/rust-brotli-decompressor" }
+
+# Defaults approximate how Chromium builds Rust (opt-level 3, `panic=abort`)
+# while letting LLVM optimize across the crate boundaries (fat LTO, one
+# codegen unit). `lto` and `panic` can be overridden from CMake with
+# `-DBROTLI_BENCH_RUST_LTO=...` / `-DBROTLI_BENCH_RUST_PANIC=...`.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = true
+incremental = false
