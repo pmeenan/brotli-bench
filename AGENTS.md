@@ -269,6 +269,16 @@ numbers with the exact command, machine, and commit SHAs.
     - `parity`: 600/600 decode, 440/600 exact (408/408 standard), span
       repro passes.
   - Not pushed; superproject pointers are unchanged.
+- **2026-10-29** - Pushed fork branches over SSH:
+  - `pmeenan/rust-brotli`: `fix-dict-span`, `parity`, `perf`;
+  - `pmeenan/rust-brotli-decompressor`: `perf`.
+
+  The scaffolding commit was missing the submodule gitlinks (it had only
+  `.gitmodules`). Added them, pinned at brotli-c `d89c4b1`, rust-brotli
+  `perf` `27a1859`, and decompressor `perf` `2ed02ed`. Note: the fork
+  `origin` remotes use HTTPS, which prompts for credentials. Push with the
+  SSH URL (`git push git@github.com:pmeenan/<repo>.git <branch>`) or set
+  `remote.origin.pushurl`.
 
 ## Maintaining documentation
 

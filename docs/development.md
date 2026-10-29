@@ -125,19 +125,20 @@ run-to-run drift) and summarize with `scripts/summarize_bench.py`.
 
 ## Current status
 
-Created 2026-10-29 in the local submodule checkouts. The fork `master`
-branches equal `upstream/master`.
+Created and pushed to the forks on 2026-10-29. The fork `master` branches
+equal `upstream/master`.
 
 | Fork | Branch | Tip | Base | Content | Gates | Pushed |
 | --- | --- | --- | --- | --- | --- | --- |
-| rust-brotli | `fix-dict-span` | `822b2dc` | `master` (`6df909c`) | patch 0008 | verify 600/600 decode, 200/600 exact; span repro passes; cargo test 43/43 | no |
-| rust-brotli | `parity` | `27a1859` | `fix-dict-span` | patches 0001-0007 | verify 600/600 decode, 440/600 exact (408/408 standard, 32 dictionary q0/q1); span repro passes; cargo test 43/43 | no |
-| rust-brotli | `perf` | `27a1859` | `parity` | (empty) | same as `parity` | no |
-| rust-brotli-decompressor | `perf` | `2ed02ed` | `master` | (empty) | - | no |
+| rust-brotli | `fix-dict-span` | `822b2dc` | `master` (`6df909c`) | patch 0008 | verify 600/600 decode, 200/600 exact; span repro passes; cargo test 43/43 | yes |
+| rust-brotli | `parity` | `27a1859` | `fix-dict-span` | patches 0001-0007 | verify 600/600 decode, 440/600 exact (408/408 standard, 32 dictionary q0/q1); span repro passes; cargo test 43/43 | yes |
+| rust-brotli | `perf` | `27a1859` | `parity` | (empty) | same as `parity` | yes |
+| rust-brotli-decompressor | `perf` | `2ed02ed` | `master` | (empty) | - | yes |
 
-Both submodules are checked out on `perf`. The superproject's recorded
-submodule pointers still reference the `master` SHAs: bump them after the
-branches are pushed (see *Updating the submodule pointer*).
+The superproject pins `vendor/rust-brotli` at `perf` (`27a1859`),
+`vendor/rust-brotli-decompressor` at `perf` (`2ed02ed`), and
+`vendor/brotli-c` at `d89c4b1`. To measure the unpatched baseline encoder,
+check out `master` (`6df909c`) in `vendor/rust-brotli` and rebuild.
 
 Upstream PRs: none opened yet. Candidate standalone decoder cleanup:
 `extern fn` -> `extern "C" fn` in `src/ffi/mod.rs` (silences ~19
