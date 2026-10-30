@@ -162,9 +162,17 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
    - Do **not** modify `vendor/brotli-c`; it is the reference.
    - Keep changes upstreamable to `dropbox/*`: no harness-only hacks in the
      crates, keep `no_std`/feature flags working, preserve the public API.
-4. **Unsafe Rust.** Prefer safe rewrites (iterators, slice patterns, bounds
-   hoisting) over `unsafe`. If `unsafe` is necessary for a measurable win,
-   document the invariant in a `// SAFETY:` comment and mention it in the log.
+4. **No `unsafe`.** The Rust code is headed for Chromium for its memory-safety
+   benefits, so performance work must be entirely safe Rust (iterators, slice
+   patterns, fixed-size array refs, bounds hoisting).
+   - Do not add `unsafe` blocks or functions in either fork.
+   - Don't enable or extend the crates' opt-in `unsafe` cargo features, and
+     never benchmark with them.
+   - The only tolerated `unsafe` is the existing C ABI boundary code in the
+     FFI modules. Don't grow it; new FFI entry points copy the existing
+     pointer-conversion pattern.
+   - The decompressor's default build must keep compiling with
+     `forbid(unsafe_code)`.
 5. **Harness changes** must keep `bench_c` and `bench_rust` compiled from the
    same source, and keep `StandardBrotliApi` / `PrefixedCBrotliApi` in sync
    when adding API calls.
@@ -336,6 +344,12 @@ numbers with the exact command, machine, and commit SHAs.
   - Rust-only extras: memset 1-2%, `SafeReadSymbol` 1.7% (flushed).
   - Profile-run speeds (C vs Rust MiB/s): wiki q1 static 346 vs 297; wiki q5
     static 383 vs 342; wiki q5 flushed 269 vs 236; jquery q11 176 vs 158.
+- **2026-10-30** - Policy: no `unsafe` in performance work (Chromium
+  security). Updated working rule 4, `docs/decoder-perf-plan.md` (gates:
+  default build with `forbid(unsafe_code)`, no added `unsafe` in diffs) and
+  `docs/development.md`. Confirmed that the harness build doesn't enable
+  brotli-decompressor's `unsafe` feature (features: `std`, `alloc-stdlib`,
+  `ffi-api`), so the baseline measures the safe decoder.
 
 ## Maintaining documentation
 

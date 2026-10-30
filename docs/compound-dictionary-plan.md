@@ -277,8 +277,11 @@ Recorded 2026-10-30.
      after creation).
    - This is C's contract, so a C caller can switch libraries without code
      or memory-model changes, and nothing multi-MB is copied per encoder.
-   - Inside Rust, `&'static` is forged only at the FFI boundary, as the
-     decoder does in `BrotliDecoderAttachDictionary`.
+   - Inside Rust, `&'static` is forged only inside the FFI entry points,
+     which are already `unsafe extern "C"` by necessity. This is the same
+     pattern the decoder uses in `BrotliDecoderAttachDictionary`. No other
+     `unsafe` is allowed (AGENTS.md rule 4); the index and lookups must be
+     safe Rust.
    - The safe Rust API gets an owned-or-borrowed wrapper (decoder's
      `MaybeOwnedSlice` precedent). It doesn't affect C callers and can be
      refined during review.

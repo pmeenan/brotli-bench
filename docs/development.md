@@ -83,6 +83,8 @@ follows the top of each stack once it is pushed.
   command).
 - Keep `no_std`, feature flags, and the public API working. No harness-only
   hacks in the crates (see AGENTS.md > Working rules).
+- **No `unsafe`** (AGENTS.md rule 4): no added `unsafe` in any commit, and no
+  use of the crates' opt-in `unsafe` features.
 
 ## Verification gates (per commit)
 
@@ -95,6 +97,11 @@ cmake --build build -j
   --corpus docs/encoder-parity/repro/dict-span/input.txt \
   --dictionary docs/encoder-parity/repro/dict-span/dict.bin    # must pass once fix-dict-span is in
 ```
+
+Every branch also requires:
+- `git diff upstream/master...<branch> | grep '^+.*unsafe'` is empty;
+- the decompressor's default-feature `cargo build --release` compiles (it
+  enforces `forbid(unsafe_code)`).
 
 | Branch | Required `--verify` exact matches |
 | --- | --- |

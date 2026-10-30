@@ -25,10 +25,20 @@ for Chrome-style streaming, without changing behavior:
   worse than -3%.
 - **Constraints:**
   - Keep the crate upstreamable to dropbox/rust-brotli-decompressor.
-  - Prefer safe code. The crate is `forbid(unsafe_code)` unless the `unsafe`
-    or `ffi-api` features are on, and upstream relies on that guardrail.
-  - Any `unsafe` needs a measured win, a `// SAFETY:` invariant, and should be
-    discussed with upstream first.
+  - **No `unsafe`, period.** The decoder is going into Chromium for its
+    memory-safety benefits. All performance work must be safe Rust:
+    - The core crate builds with `forbid(unsafe_code)` in its default
+      configuration. Every change must keep that build green.
+    - Never enable or extend the crate's opt-in `unsafe` cargo feature
+      (`get_unchecked` paths in `memory.rs`, `decode.rs`, `reader.rs` /
+      `writer.rs`), and don't benchmark with it. The harness build enables
+      only `std` + `ffi-api` (checked with `cargo tree -e features`).
+    - The only existing `unsafe` in our build is the C ABI boundary in
+      `src/ffi/` (`ffi-api` feature), which converts raw pointers. Don't add
+      to it. If Chrome uses the Rust API directly (workstream 8), that code
+      isn't even compiled.
+    - If safe rewrites plateau short of C, document the remaining gap. Don't
+      reach for `unsafe`.
 
 ## Where we are (baseline 2026-10-29, [baseline.md](baseline.md))
 
@@ -81,6 +91,11 @@ Reading:
 
 - **Per change:** `brotli_compare --verify` must exit 0 (decode parity
   600/600).
+  - The default-feature build of the decompressor must compile, since it
+    enforces `forbid(unsafe_code)`: `cargo build --release` in
+    `vendor/rust-brotli-decompressor`.
+  - No added `unsafe` anywhere:
+    `git diff upstream/master...perf | grep '^+.*unsafe'` must be empty.
   - Also run `cargo test --release` in the decompressor.
   - Run the decompressor's fuzz targets (`vendor/rust-brotli-decompressor/fuzz`)
     for any change to bit reading, Huffman decoding, or copy logic.
@@ -114,8 +129,10 @@ Reading:
      `memcpy_within_slice`), and wrap checks.
    - Use `perf annotate` to find bounds checks and redundant length/flag
      tests.
-   - Remove them safely: slice re-borrowing, fixed-size array refs, chunked
-     copies, hoisted range proofs.
+   - Remove them safely: slice re-borrowing, fixed-size array refs
+     (`<&[u8; N]>::try_from`), `split_at` / `chunks_exact`, iterator zips,
+     hoisted range proofs the optimizer can see, and `copy_within` /
+     `copy_from_slice` for bulk copies.
    - Compare branch layout with C's `ProcessCommandsInternal`.
 2. **Bit reader (`bit_reader/mod.rs`).**
    - Compare `BrotliFillBitWindow` / `BrotliReadBits` / `BrotliLoad64LE`
@@ -164,5 +181,3 @@ Reading:
 
 - Which flags and API Chrome will actually use (workstreams 7 and 8). Ask
   before optimizing for `target-cpu=native`-specific codegen.
-- Is upstream open to an opt-in `unsafe` fast path if safe rewrites plateau
-  short of parity? Decide only with data.
