@@ -160,6 +160,11 @@ left to the reader.
 
 ## Recommendations
 
+> Encoder work is tabled while decoder performance is the priority
+> ([decoder-perf-plan.md](decoder-perf-plan.md)). Item 1 is done and in
+> upstream review as dropbox/rust-brotli#278.
+
+
 1. **Fix D5 first.** It is a correctness bug: undecodable output in a
    Chrome-relevant mode. The repro is in
    [encoder-parity/repro/dict-span/](encoder-parity/repro/dict-span/):

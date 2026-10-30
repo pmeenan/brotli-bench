@@ -4,6 +4,20 @@ How work on the Rust forks is organized, verified, and sent upstream. Keep
 this file current as branches land or the plan changes (see
 [AGENTS.md](../AGENTS.md#maintaining-documentation)).
 
+## Priorities
+
+Updated 2026-10-30.
+
+1. **Decoder performance (active).** Work on `rust-brotli-decompressor:perf`
+   per [decoder-perf-plan.md](decoder-perf-plan.md).
+2. **Encoder (tabled).**
+   - `fix-dict-span` stays in upstream review (dropbox/rust-brotli#278);
+     respond to review, and rebase the stack if it lands.
+   - `parity` stays as is.
+   - Encoder perf work and the compound-dictionary port
+     ([compound-dictionary-plan.md](compound-dictionary-plan.md)) wait until
+     the decoder reaches its target. The plans may still be refined.
+
 ## Repositories
 
 | Repo | Role | Remotes |

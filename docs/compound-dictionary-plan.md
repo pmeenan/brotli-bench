@@ -1,6 +1,6 @@
 # Plan: compound (prepared) raw dictionaries in the Rust encoder
 
-Status: **planned**; decisions recorded under [Decisions](#decisions). Not started. Owner branch: `compound-dict` (see
+Status: **tabled** (2026-10-30). Decoder performance comes first; see [decoder-perf-plan.md](decoder-perf-plan.md). The plan is complete enough to start from, and decisions are recorded under [Decisions](#decisions). Owner branch: `compound-dict` (see
 [Branching](#branching)). Background: findings D2-D6 in
 [encoder-parity.md](encoder-parity.md) and
 [encoder-parity/dictionary.md](encoder-parity/dictionary.md).

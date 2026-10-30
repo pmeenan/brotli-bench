@@ -11,6 +11,7 @@ before you finish a task** (see
 | --- | --- | --- |
 | `AGENTS.md` (this file) | Always, first | Rules, known issues, log |
 | [`docs/development.md`](docs/development.md) | Before committing to a fork, bumping a submodule, or preparing a PR | Branch layout, per-commit gates, PR / rebase / tagging process, branch status |
+| [`docs/decoder-perf-plan.md`](docs/decoder-perf-plan.md) | Before any decoder work (current priority) | Decoder perf goal, profiles, method, prioritized workstreams |
 | [`docs/baseline.md`](docs/baseline.md) (+ `docs/baseline/`) | Before and after any perf measurement | Pre-optimization numbers, methodology, noise / drift |
 | [`docs/encoder-parity.md`](docs/encoder-parity.md) (+ `docs/encoder-parity/`) | Before touching encoder code; when output changes | Every Rust-vs-C output divergence, root causes, fix patches, repros |
 | [`docs/compound-dictionary-plan.md`](docs/compound-dictionary-plan.md) | Before working on encoder dictionary support | Plan + prototype data for porting C's prepared/compound raw dictionaries (dictionaries larger than the window, q2 extension) |
@@ -28,6 +29,10 @@ reference implementation (`brotli-c`), **without changing output**:
   the same invalid streams.
 - Encoder: must produce valid streams. Bit-exact parity with C is tracked and
   desirable but not required unless noted per-quality below.
+
+**Current priority (2026-10-30): decoder performance**
+([`docs/decoder-perf-plan.md`](docs/decoder-perf-plan.md)). Encoder work is
+tabled apart from upstream review of dropbox/rust-brotli#278.
 
 The target workload is Chrome-style streaming (`BrotliSourceStream`, 32KB
 `IOBuffer`), both for static resources and for flushed/streamed responses,
@@ -321,6 +326,16 @@ numbers with the exact command, machine, and commit SHAs.
   900 KB uses it. Drafted the google/brotli issue in
   `docs/upstream/brotli-c-h54-compound-dictionary.md` (not filed). q2 is
   treated as a deliberate C choice.
+- **2026-10-30** - Re-prioritized: decoder performance first; encoder work
+  tabled. Wrote `docs/decoder-perf-plan.md`. First decode profiles (`perf`
+  cpu-clock, CPU 6; the VM has no hardware PMU and no valgrind):
+  - C and Rust spend time in the same functions, in the same proportions:
+    `ProcessCommands` is 57-92%, and in flushed mode about 20% is
+    prefix-code setup.
+  - The gap is spread across the hot loop.
+  - Rust-only extras: memset 1-2%, `SafeReadSymbol` 1.7% (flushed).
+  - Profile-run speeds (C vs Rust MiB/s): wiki q1 static 346 vs 297; wiki q5
+    static 383 vs 342; wiki q5 flushed 269 vs 236; jquery q11 176 vs 158.
 
 ## Maintaining documentation
 
