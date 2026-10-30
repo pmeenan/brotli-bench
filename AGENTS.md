@@ -12,6 +12,7 @@ before you finish a task** (see
 | `AGENTS.md` (this file) | Always, first | Rules, known issues, log |
 | [`docs/development.md`](docs/development.md) | Before committing to a fork, bumping a submodule, or preparing a PR | Branch layout, per-commit gates, PR / rebase / tagging process, branch status |
 | [`docs/decoder-perf-plan.md`](docs/decoder-perf-plan.md) | Before any decoder work (current priority) | Decoder perf goal, profiles, method, prioritized workstreams |
+| [`docs/perf-host.md`](docs/perf-host.md) | Before any performance measurement on the `linux` box | Perf host specs, `hostlock` reservation protocol, measurement recipe |
 | [`docs/baseline.md`](docs/baseline.md) (+ `docs/baseline/`) | Before and after any perf measurement | Pre-optimization numbers, methodology, noise / drift |
 | [`docs/encoder-parity.md`](docs/encoder-parity.md) (+ `docs/encoder-parity/`) | Before touching encoder code; when output changes | Every Rust-vs-C output divergence, root causes, fix patches, repros |
 | [`docs/compound-dictionary-plan.md`](docs/compound-dictionary-plan.md) | Before working on encoder dictionary support | Plan + prototype data for porting C's prepared/compound raw dictionaries (dictionaries larger than the window, q2 extension) |
@@ -140,7 +141,13 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
 1. **Verify first, then measure.** Run `brotli_compare --verify` before and
    after every change to Rust code. A perf win that breaks cross-decode or
    changes decoder output is a regression.
-2. **Benchmark hygiene.** Compare runs on the same machine, same build flags,
+2. **Benchmark hygiene.** Performance numbers come from the physical `linux`
+   host; always reserve it with `hostlock`, as described in
+   [`docs/perf-host.md`](docs/perf-host.md).
+   - Builds and `--verify` run under `hostlock shared`.
+   - Timing runs and profiling run under `hostlock exclusive`.
+
+   Beyond that, compare runs on the same machine, same build flags,
    quiet system. Prefer pinning (`taskset -c N`) and repeated runs; report
    the `+/-` spread, not just one number. Record before/after numbers in the
    log below. Encode at q8-q10 drifts 10%-2.5x between runs (page faults /
@@ -350,6 +357,13 @@ numbers with the exact command, machine, and commit SHAs.
   `docs/development.md`. Confirmed that the harness build doesn't enable
   brotli-decompressor's `unsafe` feature (features: `std`, `alloc-stdlib`,
   `ffi-api`), so the baseline measures the safe decoder.
+- **2026-10-30** - Documented the physical perf host `linux` and its
+  `hostlock` reservation protocol in `docs/perf-host.md`.
+  - Host: i9-11900KF 8C/16T, PMU counters available, `powersave` + turbo.
+  - `hostlock` is `~/.local/bin/hostlock`, with the lock dir `~/.hostlock`.
+  - `cmake` is not installed there yet.
+  - At the time of checking, another project (`chunky: cache-bench`) held
+    the exclusive lock.
 
 ## Maintaining documentation
 

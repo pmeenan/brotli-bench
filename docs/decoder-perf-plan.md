@@ -99,6 +99,8 @@ Reading:
   - Also run `cargo test --release` in the decompressor.
   - Run the decompressor's fuzz targets (`vendor/rust-brotli-decompressor/fuzz`)
     for any change to bit reading, Huffman decoding, or copy logic.
+- **Measure on the physical `linux` host** under `hostlock exclusive`
+  ([perf-host.md](perf-host.md)). Record a host-specific baseline first.
 - **Measure decode only.** It is stable to about 0.3% between runs (see
   baseline.md), so 1-2% wins are measurable.
   - Quick loop: `bench_rust --op decode` on a few representative cases,
@@ -111,8 +113,9 @@ Reading:
 - **Profiling:**
   - `perf record -g` / `perf annotate` on `bench_rust` vs `bench_c` for the
     same case. Compare hot loops instruction by instruction.
-  - This VM has no hardware counters and no valgrind. For instruction counts
-    and IPC, use a bare-metal or PMU-enabled machine when needed.
+  - The dev VM has no hardware counters or valgrind. The `linux` host has
+    PMU counters (`perf stat -e instructions:u,cycles:u`), so instruction
+    counts and IPC are available there.
 - **Representative quick set:**
   - `wiki-Brotli.html` q1/q5/q11, static and flushed;
   - `jquery-3.7.1.min.js` q5/q11;
