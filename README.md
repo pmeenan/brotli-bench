@@ -43,6 +43,7 @@ Provenance, licenses, and compression ratios are in [corpora/SOURCES.md](corpora
 ```bash
 ./build/brotli_compare --verify                         # everything, q0-11, static + flushed
 ./build/brotli_compare --verify --set dictionary --quality 5-6
+./build/brotli_compare --verify --lgwin 18 --corpus wiki-Brotli.html --dictionary big.dict  # dictionary larger than the window
 ```
 
 ### 2. Side-by-Side Benchmark Suite

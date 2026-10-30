@@ -176,7 +176,9 @@ left to the reader.
 
    With these, any change to Rust output during optimization is
    immediately visible as a bitstream diff instead of a size wobble.
-3. **The dictionary model (D3) is a product decision.** Porting C's
+3. **The dictionary model (D3) is a product decision.** Decided: port C's
+   model, keep q2 dictionary use as a Rust extension. See
+   [compound-dictionary-plan.md](compound-dictionary-plan.md). Porting C's
    compound/prepared dictionary gives C parity and much better q3-q6 delta
    compression (up to 65% smaller). It also allows prepared-dictionary reuse
    through the FFI (`BrotliEncoderPrepareDictionary` /

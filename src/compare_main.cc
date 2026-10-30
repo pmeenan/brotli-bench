@@ -84,6 +84,7 @@ struct CliOptions {
   double min_time_ms = 300.0;
   int min_iters = 3;
   int max_iters = 100000;
+  int lgwin = BROTLI_DEFAULT_WINDOW;
   std::string verify_csv_path;
   std::string bench_csv_path;
   std::string dump_dir;
@@ -102,6 +103,7 @@ void PrintHelp(const char* prog) {
       << "  --dictionary <path>      Attach this raw dictionary to every selected case\n"
       << "  --flushed-chunk <bytes>  Input chunk size for flushed mode (default: 4096)\n"
       << "  --static-chunk <bytes>   Network read size for static mode (default: 16384)\n"
+      << "  --lgwin <10..24>         Encoder window bits (default: 22)\n"
       << "  --min-time-ms <ms>       Bench: min timed duration per impl/cell (default: 300)\n"
       << "  --min-iters <n>          Bench: min timed iterations per impl/cell (default: 3)\n"
       << "  --max-iters <n>          Bench: max timed iterations per impl/cell (default: 100000)\n"
@@ -166,6 +168,11 @@ bool ParseCli(int argc, char** argv, CliOptions* opts) {
     } else if (arg == "--flushed-chunk" && value(&v)) {
       if (!ParseInt64(v, 1, int64_t{1} << 30, &n)) return bad(v);
       opts->flushed_chunk_size = static_cast<size_t>(n);
+    } else if (arg == "--lgwin" && value(&v)) {
+      if (!ParseInt64(v, BROTLI_MIN_WINDOW_BITS, BROTLI_MAX_WINDOW_BITS, &n)) {
+        return bad(v);
+      }
+      opts->lgwin = static_cast<int>(n);
     } else if (arg == "--static-chunk" && value(&v)) {
       if (!ParseInt64(v, 1, int64_t{1} << 30, &n)) return bad(v);
       opts->static_chunk_size = static_cast<size_t>(n);
@@ -293,10 +300,10 @@ StreamConfig MakeConfig(const CliOptions& opts, StreamMode mode) {
   return config;
 }
 
-EncoderParams MakeParams(const TestCase& tc, int quality) {
+EncoderParams MakeParams(const TestCase& tc, int quality, int lgwin) {
   EncoderParams params;
   params.quality = quality;
-  params.lgwin = BROTLI_DEFAULT_WINDOW;
+  params.lgwin = lgwin;
   params.mode = BROTLI_DEFAULT_MODE;
   params.dictionary = tc.dict();
   return params;
@@ -363,7 +370,7 @@ bool RunVerifySuite(const CliOptions& opts) {
   std::ofstream csv;
   if (!OpenCsv(opts.verify_csv_path,
                "case,mode,quality,input_size,dict_size,c_size,rust_size,"
-               "exact,first_diff,pass,c_nodict_size",
+               "exact,first_diff,pass,c_nodict_size,lgwin",
                &csv)) {
     return false;
   }
@@ -381,9 +388,9 @@ bool RunVerifySuite(const CliOptions& opts) {
   size_t passes = 0;
 
   std::printf("%s\n BROTLI PARITY & CROSS-DECODER VERIFICATION\n", kRule);
-  std::printf(" C encoder 0x%x / decoder 0x%x | Rust encoder 0x%x / decoder 0x%x\n",
+  std::printf(" C encoder 0x%x / decoder 0x%x | Rust encoder 0x%x / decoder 0x%x | lgwin %d\n",
               CApi::EncoderVersion(), CApi::DecoderVersion(),
-              RustApi::EncoderVersion(), RustApi::DecoderVersion());
+              RustApi::EncoderVersion(), RustApi::DecoderVersion(), opts.lgwin);
   std::printf(" CC/CR/RC/RR = {C,Rust}-encoded -> {C,Rust}-decoded. NoDict = "
               "C/Rust decoders agree on a dictionary stream decoded without "
               "its dictionary.\n%s\n", kRule);
@@ -400,7 +407,7 @@ bool RunVerifySuite(const CliOptions& opts) {
       const StreamConfig config = MakeConfig(opts, mode);
       for (int q = opts.min_quality; q <= opts.max_quality; ++q) {
         ++total_cases;
-        const EncoderParams params = MakeParams(tc, q);
+        const EncoderParams params = MakeParams(tc, q, opts.lgwin);
         const EncodeResult c_enc = EncodeStream<CApi>(
             config, tc.input.data(), tc.input.size(), params);
         const EncodeResult r_enc = EncodeStream<RustApi>(
@@ -477,7 +484,8 @@ bool RunVerifySuite(const CliOptions& opts) {
               << (cmp.first_diff_offset ? std::to_string(*cmp.first_diff_offset)
                                         : std::string())
               << "," << (all_ok ? 1 : 0) << ","
-              << (c_nodict_size == "-" ? std::string() : c_nodict_size) << "\n";
+              << (c_nodict_size == "-" ? std::string() : c_nodict_size) << ","
+              << opts.lgwin << "\n";
         }
         if (!opts.dump_dir.empty() && !cmp.exact_match) {
           const std::string base = (std::filesystem::path(opts.dump_dir) /
@@ -583,7 +591,7 @@ bool RunBenchSuite(const CliOptions& opts) {
                "case,mode,quality,input_size,dict_size,c_size,rust_size,exact,"
                "c_enc_mibs,c_enc_spread_pct,rust_enc_mibs,rust_enc_spread_pct,"
                "c_dec_mibs,c_dec_spread_pct,rust_dec_mibs,rust_dec_spread_pct,"
-               "c_chunk_us,rust_chunk_us,enc_iters,dec_iters",
+               "c_chunk_us,rust_chunk_us,enc_iters,dec_iters,lgwin",
                &csv)) {
     return false;
   }
@@ -591,9 +599,9 @@ bool RunBenchSuite(const CliOptions& opts) {
   bool all_ok = true;
   std::printf("\n%s\n BROTLI SIDE-BY-SIDE BENCHMARK (C reference vs Rust FFI)\n",
               kRule);
-  std::printf(" Flushed chunk: %zu B | Static read chunk: %zu B | Decode output "
+  std::printf(" lgwin %d | Flushed chunk: %zu B | Static read chunk: %zu B | Decode output "
               "buffer: %zu B | min %.0f ms & %d iters per impl/cell\n",
-              opts.flushed_chunk_size, opts.static_chunk_size,
+              opts.lgwin, opts.flushed_chunk_size, opts.static_chunk_size,
               kChromeIOBufferSize, opts.min_time_ms, opts.min_iters);
   std::printf(" MiB/s of uncompressed data, median (+/- half IQR). Decode uses "
               "the C-encoded stream for both decoders. Delta = Rust vs C.\n%s\n",
@@ -611,7 +619,7 @@ bool RunBenchSuite(const CliOptions& opts) {
     for (StreamMode mode : opts.modes) {
       const StreamConfig config = MakeConfig(opts, mode);
       for (int q = opts.min_quality; q <= opts.max_quality; ++q) {
-        const EncoderParams params = MakeParams(tc, q);
+        const EncoderParams params = MakeParams(tc, q, opts.lgwin);
         auto fail_row = [&](const std::string& why) {
           std::printf("%-7s | %2d | FAIL: %s\n", StreamModeName(mode), q,
                       why.c_str());
@@ -729,14 +737,15 @@ bool RunBenchSuite(const CliOptions& opts) {
           std::snprintf(
               line, sizeof(line),
               "%s,%s,%d,%zu,%zu,%zu,%zu,%d,%.3f,%.2f,%.3f,%.2f,%.3f,%.2f,%.3f,"
-              "%.2f,%.3f,%.3f,%zu,%zu",
+              "%.2f,%.3f,%.3f,%zu,%zu,%d",
               tc.name.c_str(), StreamModeName(mode), q, n, tc.dictionary.size(),
               cmp.c_size, cmp.rust_size, cmp.exact_match ? 1 : 0,
               MiBPerSec(n, ce.median), ce.SpreadPct(), MiBPerSec(n, re.median),
               re.SpreadPct(), MiBPerSec(n, cd.median), cd.SpreadPct(),
               MiBPerSec(n, rd.median), rd.SpreadPct(),
               ComputeStats(c_dec.chunk_us).median,
-              ComputeStats(r_dec.chunk_us).median, ce.count, cd.count);
+              ComputeStats(r_dec.chunk_us).median, ce.count, cd.count,
+              opts.lgwin);
           csv << line << "\n" << std::flush;
         }
       }

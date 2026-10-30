@@ -23,6 +23,7 @@ struct BenchOptions {
   std::string op = "decode";
   StreamMode mode = StreamMode::kStatic;
   int quality = 6;
+  int lgwin = BROTLI_DEFAULT_WINDOW;
   size_t chunk_size = 0;  // 0 means use mode default (4KB flushed, 16KB static)
   std::string input_path = "vendor/brotli-c/tests/testdata/alice29.txt";
   std::string dictionary_path;
@@ -37,6 +38,7 @@ void PrintUsage(const char* prog) {
       << "  --op <encode|decode>     Operation to profile (default: decode)\n"
       << "  --mode <flushed|static>  Streaming workload mode (default: static)\n"
       << "  --quality <0..11>        Brotli quality level (default: 6)\n"
+      << "  --lgwin <10..24>         Encoder window bits (default: 22)\n"
       << "  --chunk-size <bytes>     Flushed input chunk / static read size\n"
       << "                           (default: 4096 flushed, 16384 static)\n"
       << "  --input <path>           Input file path (default: alice29.txt)\n"
@@ -81,6 +83,12 @@ bool ParseArgs(int argc, char** argv, BenchOptions* opts) {
         return false;
       }
       opts->quality = static_cast<int>(n);
+    } else if (arg == "--lgwin" && value(&v)) {
+      if (!ParseInt64(v, BROTLI_MIN_WINDOW_BITS, BROTLI_MAX_WINDOW_BITS, &n)) {
+        std::cerr << "Invalid --lgwin '" << v << "': expected 10..24\n";
+        return false;
+      }
+      opts->lgwin = static_cast<int>(n);
     } else if (arg == "--chunk-size" && value(&v)) {
       if (!ParseInt64(v, 1, int64_t{1} << 30, &n)) {
         std::cerr << "Invalid --chunk-size '" << v << "'\n";
@@ -120,6 +128,7 @@ void PrintStats(const char* op, const BenchOptions& opts,
   const SampleStats s = ComputeStats(ns_samples);
   std::cout << std::fixed << std::setprecision(2) << "[" << op
             << "] mode=" << StreamModeName(opts.mode) << " q=" << opts.quality
+            << " lgwin=" << opts.lgwin
             << " chunk="
             << (opts.mode == StreamMode::kFlushed
                     ? config.flushed_chunk_size
@@ -169,6 +178,7 @@ int main(int argc, char** argv) {
 
   EncoderParams params;
   params.quality = opts.quality;
+  params.lgwin = opts.lgwin;
   params.dictionary = Dictionary{dictionary.data(), dictionary.size()};
 
   std::vector<double> ns_samples;

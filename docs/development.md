@@ -49,9 +49,11 @@ rust-brotli-decompressor:
 - The decoder needs no parity work: decode output already matches C
   everywhere; only the error strings differ. Its `perf` branch starts at
   `master` and stays independent of the encoder stack.
-- Future independent topics (e.g. porting the compound/prepared dictionary
-  model, D3) get their own branch in the stack. Put it after `parity`; put it
-  before or after `perf` depending on what it touches.
+- Future independent topics get their own branch in the stack, after
+  `parity` and before or after `perf` depending on what they touch.
+  - **Planned:** `compound-dict` (C's prepared/compound raw dictionary
+    model, see [compound-dictionary-plan.md](compound-dictionary-plan.md)).
+    It goes between `parity` and `perf`.
 
 The superproject records exact commit SHAs, not branch names. `.gitmodules`
 sets `branch = perf` for both forks, so `git submodule update --remote`

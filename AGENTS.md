@@ -13,6 +13,7 @@ before you finish a task** (see
 | [`docs/development.md`](docs/development.md) | Before committing to a fork, bumping a submodule, or preparing a PR | Branch layout, per-commit gates, PR / rebase / tagging process, branch status |
 | [`docs/baseline.md`](docs/baseline.md) (+ `docs/baseline/`) | Before and after any perf measurement | Pre-optimization numbers, methodology, noise / drift |
 | [`docs/encoder-parity.md`](docs/encoder-parity.md) (+ `docs/encoder-parity/`) | Before touching encoder code; when output changes | Every Rust-vs-C output divergence, root causes, fix patches, repros |
+| [`docs/compound-dictionary-plan.md`](docs/compound-dictionary-plan.md) | Before working on encoder dictionary support | Plan + prototype data for porting C's prepared/compound raw dictionaries (dictionaries larger than the window, q2 extension) |
 | [`corpora/SOURCES.md`](corpora/SOURCES.md) | Before adding or changing corpora | Provenance, licenses, ratios, rejected candidates |
 | [`README.md`](README.md) | Quick start | Build / usage summary |
 
@@ -112,6 +113,8 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
   machine-readable results; `--dump-dir DIR` (verify) writes `*.c.br` /
   `*.rust.br` for every non-identical encode. `--quality` takes `N` or `A-B`.
   `--dictionary FILE` attaches a raw dictionary to every selected case.
+  `--lgwin N` (10-24, default 22) sets the encoder window; `bench_c` /
+  `bench_rust` also take `--lgwin`.
 - `brotli_compare` exits non-zero if any verify check or any bench
   encode/decode fails. Bench checks every timed run (`ok`, deterministic
   encoded size, decoded size) and fully verifies decode output once per cell.
@@ -196,6 +199,8 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
   - q7-q9: Rust is slightly better.
   - Rust also disables the static dictionary when a custom dictionary is set
     (D4).
+
+  Plan to port C's model: `docs/compound-dictionary-plan.md`.
 - [ ] **Dictionary encode timings are not like-for-like.** The harness
   re-runs C's `BrotliEncoderPrepareDictionary` on every stream. That costs
   about 1.3 ms for a 64KB dictionary even at q0-q2, where it is unused.
@@ -213,8 +218,12 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
   Commit it to the fork if wanted.
 - [ ] **Rust raw dictionary scrolls out of the window (D6).** The dictionary
   is truncated to `2^lgwin - 16`, and it becomes unreachable once
-  `dict_size + pos` exceeds the window. C keeps it addressable. The corpora
-  (<= 458KB, lgwin 22) don't hit this.
+  `dict_size + pos` exceeds the window. C keeps it addressable.
+  - Confirmed with an 8 MB dictionary: Rust at lgwin 18 compresses
+    `wiki-Brotli.html` to 40601 bytes at q3, vs 16730 for C (42264 with no
+    dictionary).
+  - The decoder (`brotli-decompressor` >= 6.0) is already fine.
+  - Covered by `docs/compound-dictionary-plan.md`.
 - [ ] Latent encoder issues not exercised by the corpora (details in
   `docs/encoder-parity.md`):
   - `FastLog2u16` truncates counts >= 65536;
@@ -286,6 +295,21 @@ numbers with the exact command, machine, and commit SHAs.
   `git submodule update --init`.
 - **2026-10-29** - Opened dropbox/rust-brotli#278 from `fix-dict-span`
   (`822b2dc`): "Fix matches that run past the end of a custom dictionary".
+- **2026-10-30** - Planned porting C's compound/prepared raw dictionary to
+  the Rust encoder (`docs/compound-dictionary-plan.md`). Added `--lgwin` to
+  `brotli_compare`, `bench_c` and `bench_rust` (the CSVs gain an `lgwin`
+  column).
+  - The rust-brotli 9.0.0 README note about "compound dictionaries" is about
+    the decoder only; the encoder still uses the prefix model.
+  - Measured on CPU 6 with an 8 MB dictionary: C's output doesn't depend on
+    lgwin; Rust's degrades to near no-dictionary at lgwin 18.
+  - Prototyped C with compound-dictionary variants for H2/H54 plus a chain
+    cap (scratch build). q2 + compound dictionary is 30-60% smaller than
+    current Rust q2, and up to about 3x faster with prepare-once.
+    - jquery delta: 7011 bytes at 73.6 MiB/s, vs Rust 11991 at 59.4.
+    - 8 MB wiki dictionary: 16943 at 72.9 MiB/s, vs Rust 24251 at 28.3.
+  - C prepare costs about 110 ms and a 9.8 MB index for an 8 MB dictionary,
+    so prepare-once is required.
 
 ## Maintaining documentation
 
