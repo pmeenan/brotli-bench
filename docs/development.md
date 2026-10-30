@@ -102,6 +102,8 @@ Every branch also requires:
 - `git diff upstream/master...<branch> | grep '^+.*unsafe'` is empty;
 - the decompressor's default-feature `cargo build --release` compiles (it
   enforces `forbid(unsafe_code)`).
+  - Run it with `--target-dir` outside the repo.
+  - Delete the untracked `Cargo.lock` it creates in the submodule.
 
 | Branch | Required `--verify` exact matches |
 | --- | --- |
