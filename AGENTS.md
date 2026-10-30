@@ -145,7 +145,9 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
    host; always reserve it with `hostlock`, as described in
    [`docs/perf-host.md`](docs/perf-host.md).
    - Builds and `--verify` run under `hostlock shared`.
-   - Timing runs and profiling run under `hostlock exclusive`.
+   - Timing runs and profiling run under `hostlock exclusive`, inside a
+     `tune_benchmark_host.py run --keep-aslr` session: turbo off, frequency
+     locked at base, SMT and NMI watchdog off.
 
    Beyond that, compare runs on the same machine, same build flags,
    quiet system. Prefer pinning (`taskset -c N`) and repeated runs; report
@@ -364,6 +366,12 @@ numbers with the exact command, machine, and commit SHAs.
   - `cmake` is not installed there yet.
   - At the time of checking, another project (`chunky: cache-bench`) held
     the exclusive lock.
+- **2026-10-30** - Added noise control to `docs/perf-host.md`: the
+  optimize-campaign `tune_benchmark_host.py` tuner (turbo off,
+  `performance` governor, min = max = 3.5 GHz base, NMI watchdog off, SMT
+  off, ASLR kept on for timing runs), the canonical
+  `hostlock exclusive` + tuner + `taskset` command, and crash recovery
+  (`tune_benchmark_host.py disable`).
 
 ## Maintaining documentation
 

@@ -13,7 +13,7 @@ was taken) has no hardware performance counters and noisier encode timings.
 | SMT siblings | CPU *n* and *n*+8 share core *n* (e.g. 2 and 10) |
 | Memory | 61 GiB; THP `madvise` |
 | OS | Ubuntu, kernel 7.0 |
-| Frequency | `powersave` governor (intel_pstate, EPP `balance_performance`), turbo on. Expect clock variance; always A/B back-to-back |
+| Frequency | Default: `powersave` governor (intel_pstate, EPP `balance_performance`), turbo on, base 3.5 GHz. For measurements, lock it with the tuner (see *Noise control* below) |
 | Counters | Hardware PMU events available (`perf stat -e instructions:u,cycles:u` works; `perf_event_paranoid` = -1) |
 | Toolchain | gcc 15.2, clang, `perf`, python3, git, stable rustc/cargo 1.99.1 (`~/.cargo/bin`, on the interactive `PATH`). **No `cmake`**: install it before building the harness (ask first). Note that the dev VM builds with Chromium's nightly toolchain; pick one toolchain per comparison and record it. |
 | Shared | Other projects (e.g. `chunky`, Chromium campaigns) run builds and measurements here |
@@ -61,6 +61,56 @@ with lock files in `~/.hostlock/`. Its own documentation is
 - Locks are `flock(2)` locks, released when the process exits, even on a
   crash. **Never delete `~/.hostlock`.**
 
+## Noise control: `tune_benchmark_host.py`
+
+The `optimize-campaign` skill ships a session-scoped host tuner:
+`~/src/ai-skills/optimize-campaign/scripts/tune_benchmark_host.py`. It is on
+the host, and its docs are in `references/measurement-policy.md` ("Host
+policy inside a session"). For the duration of one command it applies:
+
+- **CPU frequency:** turbo off (`intel_pstate/no_turbo=1`), `performance`
+  governor and EPP, and every policy pinned to **min = max = base frequency**
+  (3.5 GHz here).
+- **NMI watchdog** off.
+- **SMT** off by default (`smt/control=off`), so sibling CPUs 8-15 go offline
+  and can't interfere. `--keep-smt` leaves SMT on.
+- **ASLR** off by default. **Use `--keep-aslr` for timing runs**, as the
+  campaign's score runs do: per-process layout randomization averages out
+  alignment luck. Leave ASLR off only when stable addresses are needed (e.g.
+  comparing `perf annotate` output across runs).
+- VT/GPU/service options exist for browser campaigns; they aren't needed
+  here.
+
+How it behaves:
+- Every setting is read back after writing.
+- Everything is restored in reverse order when the command exits, even on
+  SIGINT/SIGTERM.
+- It uses `sudo -n` (passwordless sudo is configured on the host).
+- It records the saved state in `/tmp/bench_host_tuning_state.json` and
+  refuses to start if that file already exists.
+  - If a session ever dies without restoring, run
+    `tune_benchmark_host.py disable` to restore from that file.
+  - Never delete the file by hand.
+- `run` also takes the measurement lease. Inside a `hostlock exclusive` hold
+  it reuses that hold (`HOSTLOCK_HELD`) instead of re-locking.
+- `--report FILE` writes the before/during/after sysfs state plus observations
+  (current frequencies, thermal throttle counters, load, online CPUs). Keep it
+  next to the CSV; a throttle-count increase invalidates a run.
+
+Canonical measurement command (the outer `hostlock` gives the hold a
+descriptive label):
+
+```bash
+T=~/src/ai-skills/optimize-campaign/scripts/tune_benchmark_host.py
+hostlock exclusive --label "brotli-bench: decode A/B" -- \
+  python3 $T run --keep-aslr --report /tmp/tune-report.json -- \
+    taskset -c 2 ./build/brotli_compare --bench --bench-csv /tmp/ab.csv
+```
+
+Absolute numbers at the locked 3.5 GHz base clock are lower than with turbo,
+and they aren't comparable to the GCE baseline. Compare Rust/C ratios and
+A/B deltas within the same tuned configuration only.
+
 ## Measurement recipe for this project
 
 1. Sync the code: clone or fetch `pmeenan/brotli-bench` on the host. Never
@@ -72,9 +122,10 @@ with lock files in `~/.hostlock/`. Its own documentation is
    ```
 3. Run `--verify` under a shared hold (it's a correctness check, not a
    measurement).
-4. Measure under one exclusive hold, pinned to a single core with its SMT
-   sibling left idle (e.g. `taskset -c 2`, keep CPU 10 free). Run the
-   baseline build and the candidate back-to-back inside the same hold.
+4. Measure under one exclusive hold *and* one tuner session (canonical
+   command above), pinned to a single core (`taskset -c 2`; SMT is off
+   during the session). Run the baseline build and the candidate
+   back-to-back inside the same session, and keep the `--report` file.
 5. **This host needs its own reference numbers.** Before the first decoder
    change, record a dated baseline here (e.g.
    `docs/baseline/bench-<date>-linux.csv`, plus an environment file). Add it
