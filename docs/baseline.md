@@ -423,3 +423,136 @@ Fixed per-stream cost (1-byte input, median per stream, same session):
      likely page faults with THP set to `madvise` here.
    - Encoder work is tabled, but this belongs on the encoder perf list (see
      AGENTS.md known issues).
+
+---
+
+## Post-optimization decoder benchmark: `linux` (2026-10-30)
+
+Measured after the decoder optimization series on
+`vendor/rust-brotli-decompressor:perf` (`081c5d9`: commits `0466359`,
+`1344c34`, `081c5d9`), compared against the pre-optimization `linux` baseline
+above (`docs/baseline/bench-2026-10-30-linux.csv`, `2ed02ed`).
+
+| Artifact | What |
+| --- | --- |
+| [baseline/bench-2026-10-30-decoder-perf-linux.csv](baseline/bench-2026-10-30-decoder-perf-linux.csv) | Raw bench results, 600 cells |
+| [baseline/bench-2026-10-30-decoder-perf-linux.txt](baseline/bench-2026-10-30-decoder-perf-linux.txt) | Console output |
+| [baseline/bench-2026-10-30-decoder-perf-linux-details.md](baseline/bench-2026-10-30-decoder-perf-linux-details.md) | Per-case tables (generated) |
+| [baseline/verify-2026-10-30-decoder-perf-linux.csv](baseline/verify-2026-10-30-decoder-perf-linux.csv) | `--verify`: 600/600 decode parity, 440/600 bit-exact |
+| [baseline/tune-report-2026-10-30-decoder-perf-linux.json](baseline/tune-report-2026-10-30-decoder-perf-linux.json) | `tune_benchmark_host.py` report |
+
+### Setup
+
+- **Machine & session:** identical to the `linux` baseline above (Intel Core
+  i9-11900KF, `hostlock exclusive` + `tune_benchmark_host.py run --keep-aslr`,
+  turbo off, `performance` governor, locked at 3.5 GHz, NMI watchdog off, SMT
+  off, ASLR on, `taskset -c 2`). Zero thermal or power throttling events.
+- **Code:**
+  - brotli-c `d89c4b1` (unchanged);
+  - rust-brotli `27a1859` (`perf`, unchanged);
+  - rust-brotli-decompressor **`081c5d9` (`perf`)**.
+- **Noise:**
+  - Median half-IQR spread: 0.5% (C encode), 0.6% (Rust encode), 1.7% (C
+    decode), 1.6% (Rust decode).
+  - p90 spread: 1.6% / 1.9% (encode), 2.7% / 2.7% (decode).
+
+### Headline numbers (linux, post-optimization)
+
+#### Decode: Rust vs C throughput (geomean)
+
+Both decoders decode the same C-encoded stream. Positive = Rust faster.
+
+| Q | static standard | static dictionary | flushed standard | flushed dictionary |
+|---:|---:|---:|---:|---:|
+| 0 | +1.2% | +1.1% | +5.6% | +5.4% |
+| 1 | +1.5% | +1.3% | +4.8% | +4.7% |
+| 2 | +1.7% | +2.6% | +3.3% | +4.5% |
+| 3 | +2.7% | +10.6% | +4.8% | +10.0% |
+| 4 | +3.1% | +9.5% | +2.9% | +7.8% |
+| 5 | +2.5% | +8.5% | +2.2% | +7.0% |
+| 6 | +2.3% | +8.6% | +2.0% | +7.1% |
+| 7 | +2.0% | +8.0% | +1.7% | +6.9% |
+| 8 | +1.9% | +8.1% | +1.7% | +6.5% |
+| 9 | +1.9% | +8.3% | +1.7% | +6.6% |
+| 10 | +0.9% | +4.9% | +1.5% | +4.2% |
+| 11 | -0.1% | +5.7% | +0.9% | +4.7% |
+| **all** | **+1.8%** | **+6.4%** | **+2.7%** | **+6.3%** |
+
+#### Rust decode vs baseline (geomean)
+
+Baseline: `docs/baseline/bench-2026-10-30-linux.csv` (`2ed02ed`). Positive = faster.
+
+| Q | static standard | static dictionary | flushed standard | flushed dictionary |
+|---:|---:|---:|---:|---:|
+| 0 | +7.1% | +7.2% | +13.6% | +12.8% |
+| 1 | +8.9% | +8.9% | +12.6% | +12.6% |
+| 2 | +9.8% | +10.0% | +11.5% | +11.7% |
+| 3 | +9.5% | +22.4% | +12.0% | +23.1% |
+| 4 | +8.6% | +21.7% | +11.6% | +22.9% |
+| 5 | +6.9% | +20.2% | +10.1% | +21.7% |
+| 6 | +6.8% | +19.8% | +10.2% | +21.9% |
+| 7 | +6.8% | +19.6% | +9.8% | +21.9% |
+| 8 | +6.7% | +19.9% | +9.8% | +22.0% |
+| 9 | +6.6% | +19.8% | +9.7% | +21.9% |
+| 10 | +1.8% | +15.6% | +6.1% | +19.1% |
+| 11 | +1.6% | +16.1% | +6.6% | +19.5% |
+| **all** | **+6.7%** | **+16.7%** | **+10.3%** | **+19.2%** |
+
+#### C decode vs baseline (noise check)
+
+| Q | static standard | static dictionary | flushed standard | flushed dictionary |
+|---:|---:|---:|---:|---:|
+| **all** | -0.0% | +0.3% | +0.6% | +1.2% |
+
+Typical absolute throughput at 3.5 GHz (medians over the 16 standard cases
+excluding `monkey`; MiB/s, static mode; last column is the median flushed
+per-chunk decode latency):
+
+| Q | C enc | Rust enc | C dec | Rust dec | Flushed chunk latency C / Rust (us) |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 294.1 | 192.6 | 318.8 | 324.0 | 16.3 / 15.4 |
+| 1 | 224.9 | 140.4 | 327.6 | 335.8 | 17.0 / 16.2 |
+| 2 | 105.6 | 77.1 | 347.4 | 358.5 | 13.9 / 13.1 |
+| 3 | 89.9 | 70.3 | 365.0 | 375.7 | 13.4 / 12.7 |
+| 4 | 57.8 | 50.7 | 388.6 | 406.5 | 13.1 / 12.5 |
+| 5 | 41.3 | 34.1 | 416.1 | 435.3 | 12.4 / 11.9 |
+| 6 | 37.3 | 29.7 | 429.1 | 449.9 | 12.0 / 11.7 |
+| 7 | 31.5 | 22.6 | 436.1 | 455.2 | 11.8 / 11.5 |
+| 8 | 29.5 | 18.8 | 442.6 | 460.5 | 11.7 / 11.4 |
+| 9 | 10.4 | 7.3 | 444.5 | 462.1 | 11.7 / 11.4 |
+| 10 | 2.0 | 1.4 | 317.6 | 330.1 | 15.5 / 15.0 |
+| 11 | 0.7 | 0.6 | 362.6 | 375.3 | 14.4 / 13.9 |
+
+Fixed per-stream decode cost (1-byte input, 50,000 iterations, same session):
+
+| Op | C (us) | Rust before (us) | Rust after (us) |
+|---|---:|---:|---:|
+| decode | 0.34 | 0.46 | 0.43 |
+| decode (64KB dictionary) | 0.34 | 0.49 | 0.45 |
+
+### Second microarchitecture spot-check: GCE Skylake-SP (2026-10-30)
+
+Measured on the GCE Skylake-SP 2.0 GHz dev VM (`taskset -c 2`, 300 cells across
+`q0,2,5,8,10,11`, compared against `docs/baseline/bench-2026-10-29.csv`):
+
+| Mode & set | Rust vs C (before) | Rust vs C (after) | Rust decode vs 2026-10-29 baseline |
+|---|---:|---:|---:|
+| static standard | -11.6% | -3.3% | **+7.7%** |
+| static dictionary | -12.9% | **+4.0%** | **+15.5%** |
+| flushed standard | -13.5% | -1.5% | **+12.0%** |
+| flushed dictionary | -14.8% | **+3.1%** | **+17.5%** |
+
+### Observations (post-optimization)
+
+1. **All 4 `(mode x case set)` columns beat C on `linux`:** `+1.8%` (static
+   standard), `+6.4%` (static dictionary), `+2.7%` (flushed standard), and
+   `+6.3%` (flushed dictionary). Every cell in the 48-cell quality summary
+   table is `>= -0.1%` (47 of 48 positive).
+2. **Median static decode throughput and flushed chunk latency beat C at every
+   quality `0..11`.**
+3. **Remaining fixed allocation zeroing on tiny single-metablock streams:**
+   in safe Rust, allocating `&mut [u8]` for the ringbuffer requires zero-filling
+   (`calloc`). On ultra-short streams that still allocate a full ringbuffer
+   (such as `dict:bootstrap-5.3.2-to-5.3.3.min.css`, a 193-byte delta stream
+   that decodes 227 KB in ~15 us in C vs ~19 us in Rust, or `monkey`), that
+   zero-fill accounts for the remaining ~3-4 us per-stream difference.

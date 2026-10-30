@@ -44,9 +44,30 @@ for Chrome-style streaming, without changing behavior:
 
 ## Where we are
 
-**Perf host `linux` (the reference; [baseline.md](baseline.md#perf-host-baseline-linux-2026-10-30)):**
+**Post-optimization on `linux` (2026-10-30, `rust-brotli-decompressor` `perf` `081c5d9`; [baseline.md](baseline.md#post-optimization-decoder-benchmark-linux-2026-10-30)):**
 i9-11900KF locked at 3.5 GHz. Rust vs C decode throughput, geomean
-(negative = Rust slower):
+(positive = Rust faster):
+
+| | Static (before -> after) | Flushed (before -> after) |
+|---|---:|---:|
+| Standard cases | -4.6% -> **+1.8%** (+6.7% vs baseline) | -6.2% -> **+2.7%** (+10.3% vs baseline) |
+| Dictionary cases | -8.5% -> **+6.4%** (+16.7% vs baseline) | -9.8% -> **+6.3%** (+19.2% vs baseline) |
+
+All 48 `(quality x mode x case set)` cells in the summary table meet the
+`>= -3%` target: 47 of 48 are positive (`+0.9%` to `+10.6%`), and the single
+negative cell is `static standard q11` at `-0.1%`.
+- **Fixed cost per stream (1-byte input):** 0.34 us (C) vs 0.43 us (Rust, down
+  from 0.46 us); with a 64 KB dictionary, 0.34 us (C) vs 0.45 us (Rust, down
+  from 0.49 us).
+- **GCE Skylake-SP spot-check (300 cells vs 2026-10-29 baseline):**
+  - `static standard`: **+7.7% vs baseline** (-11.6% -> -3.3% vs C);
+  - `static dictionary`: **+15.5% vs baseline** (-10.5% -> **+4.0% vs C**);
+  - `flushed standard`: **+12.0% vs baseline** (-13.5% -> -1.5% vs C);
+  - `flushed dictionary`: **+17.5% vs baseline** (-12.6% -> **+3.1% vs C**).
+
+**Pre-optimization perf host baseline `linux` ([baseline.md](baseline.md#perf-host-baseline-linux-2026-10-30)):**
+i9-11900KF locked at 3.5 GHz (`rust-brotli-decompressor` `2ed02ed`). Rust vs C
+decode throughput, geomean (negative = Rust slower):
 
 | | Static | Flushed |
 |---|---:|---:|
@@ -146,50 +167,71 @@ Reading:
 
 ## Workstreams (in priority order)
 
-1. **Hot command loop (`ProcessCommandsInternal`, `decode.rs:3318`).**
-   This is where 57-92% of the time goes.
-   - Literal loop (`ReadPreloadedSymbol` path), insert/copy, the ring-buffer
-     copy helpers (`memmove16`, `copy_overlapping_backreference`,
-     `memcpy_within_slice`), and wrap checks.
-   - Use `perf annotate` to find bounds checks and redundant length/flag
-     tests.
-   - Remove them safely: slice re-borrowing, fixed-size array refs
-     (`<&[u8; N]>::try_from`), `split_at` / `chunks_exact`, iterator zips,
-     hoisted range proofs the optimizer can see, and `copy_within` /
-     `copy_from_slice` for bulk copies.
-   - Compare branch layout with C's `ProcessCommandsInternal`.
-2. **Bit reader (`bit_reader/mod.rs`).**
-   - Compare `BrotliFillBitWindow` / `BrotliReadBits` / `BrotliLoad64LE`
-     codegen against C. Look for a per-load bounds check on the input slice.
-   - Consider guaranteeing input slack the way C's fast/safe split does
-     (`CheckInputAmount`), so the fast path loads without checks.
+1. **Hot command loop (`ProcessCommandsInternal`, `decode.rs`) — DONE (`081c5d9`, `0466359`).**
+   - Introduced fixed-size array types (`LiteralTree = [HuffmanCode; 632]`,
+     `CommandTree = [HuffmanCode; 1080]`, `HuffmanRootTable = [HuffmanCode; 256]`)
+     so tree pointers are thin 8-byte references and 8-bit root-table lookups
+     have no slice bounds checks.
+   - Replaced the 1024-byte zeroed `[&[HuffmanCode]; 64]` `context_trees`
+     array with `Option<([&LiteralTree; 64], usize)> = None`, populated only
+     when non-trivial literal contexts are used.
+   - Added fast slice-based inner literal loops for both trivial and
+     non-trivial literal contexts, hoisted `literal_htree` across commands,
+     and jumped directly back to the fast literal loop after
+     `DecodeLiteralBlockSwitch` when slack allows.
+   - Matched C's block-switch inlining structure (`#[inline(never)]` on
+     `Decode*BlockSwitch` / `SafeDecode*BlockSwitch` and `#[inline(always)]`
+     on `DecodeBlockTypeAndLength`, `PrepareLiteralDecoding`, and
+     `Decode*BlockSwitchInternal`) so `safe` and `tree_type` constant-fold
+     without bloating `ProcessCommandsInternal`.
+   - Added a `17..=32` byte overlapping copy arm to `transform::copy_bytes`
+     (`0466359`), bound `s.ringbuffer.slice_mut()` once in backward copy and
+     wrap-copy states, and eliminated 6 dead `MemoryBlock::drop` checks when
+     restoring `saved_*_hgroup` on exit from `ProcessCommandsInternal`.
+2. **Bit reader (`bit_reader/mod.rs`) — DONE (`0466359`).**
+   - Unified `BrotliFillBitWindow` with `BrotliFillBitWindowCompileTimeNbits`.
 3. **Prefix-code setup (`ReadHuffmanCode`, `BrotliBuildHuffmanTable`,
-   `ReplicateValue`, context maps).** About 20% in flushed mode.
-   - Match C's table-building loops.
-   - Avoid zeroing that C doesn't do (the memset samples).
-4. **Fixed per-stream costs.**
-   - Instance create/destroy, allocations and their zeroing, ring-buffer
-     sizing, dictionary attach (0.69 vs 0.50 us).
-   - Matters for small responses and many-stream workloads.
-5. **Streaming / flushed path.**
-   - Extra fast-to-safe-path transitions near chunk ends
-     (`SafeReadSymbol`, `SafeProcessCommands`).
-   - Per-call state-machine overhead.
-   - `WriteRingBuffer` / output copies into the 32 KB `IOBuffer`.
-6. **Dictionary decode.**
-   - `CopyFromCompoundDictionary` / `InitializeCompoundDictionaryCopy`, and
-     the q10/q11 dictionary gap (-14 to -16% vs -7.5 to -11% without a
-     dictionary).
-7. **Build configuration realism.**
+   `ReplicateValue`, context maps) — DONE (`1344c34`).**
+   - Replaced signed modulo (`idiv`) in `ReplicateValue` with a power-of-two
+     bitmask and hoisted a single subslice bounds check (`table.get_mut`).
+   - Simplified `symbol_list_value` to a single unsigned bounds check.
+   - Optimized `BrotliBuildSimpleHuffmanTable` with slice fill for 0-symbol
+     tables and `split_at_mut` + `clone_from_slice` for table doubling.
+   - Passed fixed-size array references into `ProcessSingleCodeLength` and
+     `ProcessRepeatedCodeLength`, used slice fill for `symbols_lists_array`,
+     and hoisted bounds checks out of `InverseMoveToFrontTransform`,
+     `DecodeContextMapInner`, and `DetectTrivialLiteralBlockTypes`.
+4. **Fixed per-stream costs — DONE (`1344c34`, `081c5d9`).**
+   - 1-byte decode time improved from 0.46 to 0.43 us (0.49 to 0.45 us with a
+     64 KB dictionary) on `linux`.
+   - Note: LBR profiling shows the remaining ~1% `__memset_evex_unaligned_erms`
+     on static streams is `calloc` zero-filling the ringbuffer slice and initial
+     Huffman `codes` slice, which is required by safe Rust's initialized slice
+     invariant.
+5. **Streaming / flushed path — DONE (`1344c34`, `081c5d9`).**
+   - Reused `context_map`, `context_modes`, `dist_context_map`, and
+     `HuffmanTreeGroup` (`htrees` and `codes`) across metablocks instead of
+     freeing and reallocating them on every metablock in flushed mode.
+   - Marked `SafeReadSymbol` and `ReadBlockLength` `#[inline(always)]`.
+   - Flushed decode geomean improved from -6.2% / -9.8% vs C to +2.7% / +6.3%
+     vs C on `linux`.
+6. **Dictionary decode — DONE (`081c5d9`).**
+   - Added an inline single-chunk compound dictionary fast path in
+     `ProcessCommandsInternal` using `transform::copy_bytes` when
+     `s.compound_dictionary.num_chunks == 1`, and skipped
+     `EnsureCompoundDictionaryInitialized` for single-chunk dictionaries.
+   - Dictionary decode geomean improved from -8.5% (static) / -9.8% (flushed)
+     vs C to +6.4% (static) / +6.3% (flushed) vs C on `linux`.
+7. **Build configuration realism (open).**
    - The baseline uses `-C target-cpu=native` and fat LTO. Chromium ships
      generic x86-64 (and arm64) builds with its own Rust flags.
    - Add a measurement with Chromium-like flags: no `target-cpu=native`,
      Chromium's opt-level and LTO settings. Keep the comparison like-for-like
      by building C with matching flags.
    - Wins must hold under those flags.
-8. **Integration path check.** Confirm which API Chrome will call: the C FFI
-   (what the harness measures) or the Rust API directly. Measure that path
-   too, if it differs. The FFI wrapper itself is about 2% in profiles.
+8. **Integration path check (open).** Confirm which API Chrome will call: the
+   C FFI (what the harness measures) or the Rust API directly. Measure that
+   path too, if it differs. The FFI wrapper itself is about 2% in profiles.
 
 ## Deliverables and upstreaming
 

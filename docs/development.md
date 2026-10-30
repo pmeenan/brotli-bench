@@ -158,10 +158,10 @@ equal `upstream/master`.
 | rust-brotli | `fix-dict-span` | `822b2dc` | `master` (`6df909c`) | patch 0008 | verify 600/600 decode, 200/600 exact; span repro passes; cargo test 43/43 | yes |
 | rust-brotli | `parity` | `27a1859` | `fix-dict-span` | patches 0001-0007 | verify 600/600 decode, 440/600 exact (408/408 standard, 32 dictionary q0/q1); span repro passes; cargo test 43/43 | yes |
 | rust-brotli | `perf` | `27a1859` | `parity` | (empty) | same as `parity` | yes |
-| rust-brotli-decompressor | `perf` | `2ed02ed` | `master` | (empty) | - | yes |
+| rust-brotli-decompressor | `perf` | `081c5d9` | `master` (`2ed02ed`) | 3 commits (`0466359`, `1344c34`, `081c5d9`): bit-reader/transform, metablock reuse & prefix-code setup, `ProcessCommandsInternal` & compound dict fast path | verify 600/600 decode, 440/600 exact; span repro passes; default build (`forbid(unsafe_code)`) passes; cargo test 124/124; fuzz targets pass | yes |
 
 The superproject pins `vendor/rust-brotli` at `perf` (`27a1859`),
-`vendor/rust-brotli-decompressor` at `perf` (`2ed02ed`), and
+`vendor/rust-brotli-decompressor` at `perf` (`081c5d9`), and
 `vendor/brotli-c` at `d89c4b1`. To measure the unpatched baseline encoder,
 check out `master` (`6df909c`) in `vendor/rust-brotli` and rebuild.
 

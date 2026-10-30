@@ -402,6 +402,88 @@ numbers with the exact command, machine, and commit SHAs.
     gap.
   - Encoder (parity branch): -32% static. New finding: q9 1-byte setup
     takes 12.9 ms (patch 0003). See `docs/baseline.md`.
+- **2026-10-30** - Decoder performance optimization series on
+  `vendor/rust-brotli-decompressor:perf` (`2ed02ed..081c5d9`: commits
+  `0466359`, `1344c34`, `081c5d9`), 100% safe Rust (`forbid(unsafe_code)` in
+  default build, zero added `unsafe`).
+  - **Changes landed:**
+    1. `0466359` (`bit_reader/mod.rs`, `transform.rs`): delegated
+       `BrotliFillBitWindow` to `BrotliFillBitWindowCompileTimeNbits`; added a
+       `17..=32` byte overlapping two-load/two-store arm to
+       `transform::copy_bytes`.
+    2. `1344c34` (`state.rs`, `huffman/mod.rs`, `decode.rs`): reused
+       `context_map`, `context_modes`, `dist_context_map`, and
+       `HuffmanTreeGroup` (`htrees` and `codes`) across non-final metablocks
+       instead of freeing/reallocating every metablock in flushed mode (moving
+       the `EnsureBlockTrees` pool-fragmentation guard before `hgroup.init`
+       when `needs_codes_growth` is true); replaced signed modulo (`idiv`) in
+       `ReplicateValue` with a power-of-two mask and hoisted a single
+       `table.get_mut` bounds check; simplified `symbol_list_value` to a single
+       unsigned bounds check; optimized `BrotliBuildSimpleHuffmanTable` with
+       slice fill for 0-symbol tables and `split_at_mut` + `clone_from_slice`
+       for table doubling; changed `ProcessSingleCodeLength` and
+       `ProcessRepeatedCodeLength` to take fixed-size array references; used
+       slice fill for `symbols_lists_array` in `ReadHuffmanCode`; hoisted
+       bounds checks out of `InverseMoveToFrontTransform` and
+       `DecodeContextMapInner`.
+    3. `081c5d9` (`decode.rs`): introduced fixed-size array types
+       (`LiteralTree = [HuffmanCode; 632]`,
+       `CommandTree = [HuffmanCode; 1080]`,
+       `HuffmanRootTable = [HuffmanCode; 256]`) with thin-pointer accessors so
+       8-bit root lookups in literal, command, and distance decoding have no
+       slice bounds checks; replaced the 1024-byte zeroed
+       `[&[HuffmanCode]; 64]` `context_trees` array with
+       `Option<([&LiteralTree; 64], usize)> = None`; added fast slice-based
+       inner literal loops in `ProcessCommandsInternal` for both trivial and
+       non-trivial literal contexts, hoisted `literal_htree` across commands,
+       and jumped directly back to the fast literal loop after
+       `DecodeLiteralBlockSwitch` when slack allows; matched C's block-switch
+       inlining (`#[inline(never)]` on `Decode*BlockSwitch` /
+       `SafeDecode*BlockSwitch`, `#[inline(always)]` on
+       `DecodeBlockTypeAndLength`, `PrepareLiteralDecoding`, and
+       `Decode*BlockSwitchInternal`); added an inline single-chunk compound
+       dictionary fast path using `transform::copy_bytes` when
+       `compound_dictionary.num_chunks == 1` and skipped
+       `EnsureCompoundDictionaryInitialized` for single-chunk dictionaries;
+       eliminated 6 dead `MemoryBlock::drop` checks when restoring
+       `saved_*_hgroup` on exit from `ProcessCommandsInternal`.
+  - **What was tried and reverted:**
+    - Unconditional 64-bit load in `BrotliFillBitWindowCompileTimeNbits` even
+      when `bit_pos_ < 32` (`step13`): broke streaming decode (`SafeReadBlockLength`
+      at chunk boundary when `< 8` bytes remain in input buffer) because C only
+      executes the 64-bit refill inside `if (bit_pos >= 32)`. Reverted.
+    - Replacing the inner `match s.state` (`POST_DECODE_LITERALS` /
+      `POST_WRAP_COPY`) in `ProcessCommandsInternal` with sequential `if let`
+      blocks and inlining `Decode*BlockSwitch` (`step16`): added an extra state
+      check on every non-overlapping command (+8% instructions) and bloated
+      `ProcessCommandsInternal` with 3 inlined copies of
+      `DecodeBlockTypeAndLength`, regressing geomean decode by ~2.5%. Reverted
+      the `if let` structure in `step17` and marked `Decode*BlockSwitch` /
+      `SafeDecode*BlockSwitch` `#[inline(never)]` in `step18`.
+  - **Full 600-cell benchmark on `linux` (i9-11900KF locked at 3.5 GHz,
+    `hostlock exclusive` + `tune_benchmark_host.py run --keep-aslr`,
+    `taskset -c 2`, `docs/baseline/bench-2026-10-30-decoder-perf-linux.csv` vs
+    `docs/baseline/bench-2026-10-30-linux.csv`):**
+    - `static standard` decode: **-4.6% -> +1.8% vs C** (+6.7% vs baseline);
+    - `static dictionary` decode: **-8.5% -> +6.4% vs C** (+16.7% vs baseline);
+    - `flushed standard` decode: **-6.2% -> +2.7% vs C** (+10.3% vs baseline);
+    - `flushed dictionary` decode: **-9.8% -> +6.3% vs C** (+19.2% vs baseline);
+    - 47 of 48 `(quality x mode x case set)` cells positive (`+0.9%` to
+      `+10.6%`), minimum cell `-0.1%` (`static standard q11`).
+    - 1-byte decode fixed cost: `0.46 -> 0.43 us` (`64 KB dict`: `0.49 -> 0.45 us`),
+      vs `0.34 us` for C.
+  - **Second microarchitecture spot-check on GCE Skylake-SP (`taskset -c 2`,
+    300 cells across `q0,2,5,8,10,11` vs `docs/baseline/bench-2026-10-29.csv`):**
+    - `static standard`: **+7.7% vs baseline** (-11.6% -> -3.3% vs C);
+    - `static dictionary`: **+15.5% vs baseline** (-12.9% -> **+4.0% vs C**);
+    - `flushed standard`: **+12.0% vs baseline** (-13.5% -> -1.5% vs C);
+    - `flushed dictionary`: **+17.5% vs baseline** (-14.8% -> **+3.1% vs C**).
+  - **Gates:** `--verify` 600/600 decode parity (440/600 exact), dict-span
+    repro 4/4 pass, default-feature `cargo build --release`
+    (`forbid(unsafe_code)`) passes, `cargo test --release` passes (124 lib +
+    integration tests), all 4 fuzz targets pass, zero added `unsafe`. Pushed
+    `perf` (`081c5d9`) to `pmeenan/rust-brotli-decompressor` and updated
+    submodule pointer.
 
 ## Maintaining documentation
 
