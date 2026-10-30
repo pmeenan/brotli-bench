@@ -378,6 +378,9 @@ numbers with the exact command, machine, and commit SHAs.
   `hostlock shared --label "brotli-bench: apt install cmake"`. It waited
   behind another project's exclusive measurement, then installed: `cmake
   version 4.2.3` (Ubuntu 4.2.3-2ubuntu2).
+- **2026-10-30** - `hostlock`'s quiet wait now uses the 1-minute load
+  average (< 0.5) or the 5-minute one (< 1.0), whichever comes first,
+  instead of the 15-minute one. Updated `docs/perf-host.md`.
 
 ## Maintaining documentation
 

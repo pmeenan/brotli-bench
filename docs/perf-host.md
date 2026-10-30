@@ -41,12 +41,15 @@ with lock files in `~/.hostlock/`. Its own documentation is
   What the exclusive hold does:
   1. closes the gate, so no new shared job can start;
   2. waits for running shared jobs to finish;
-  3. still holding the lock, waits until the **15-minute load average is
-     below 1.0** (`HOSTLOCK_QUIET_LOAD15`; 0 disables; don't disable it
-     casually);
+  3. still holding the lock, waits until the **1-minute load average is
+     below 0.5 or the 5-minute one is below 1.0**, whichever comes first.
+     `HOSTLOCK_QUIET_LOAD1` / `HOSTLOCK_QUIET_LOAD5` set the thresholds; 0
+     turns a condition off; both 0, or the legacy `HOSTLOCK_QUIET_LOAD15=0`,
+     skips the wait. Don't disable it casually;
   4. runs the command, then reopens the gate.
 
-  After a build, expect several minutes in the "quieting" state.
+  After a build, expect a short "quieting" wait. (Until 2026-10-30 the rule
+  used the 15-minute load average and could take much longer.)
 - **Light work needs no lock:** editing, git, reading files, short scripts.
 - **Status:**
   - `hostlock status` shows the holders, the waiters, anything quieting, and
