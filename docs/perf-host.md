@@ -15,7 +15,7 @@ was taken) has no hardware performance counters and noisier encode timings.
 | OS | Ubuntu, kernel 7.0 |
 | Frequency | Default: `powersave` governor (intel_pstate, EPP `balance_performance`), turbo on, base 3.5 GHz. For measurements, lock it with the tuner (see *Noise control* below) |
 | Counters | Hardware PMU events available (`perf stat -e instructions:u,cycles:u` works; `perf_event_paranoid` = -1) |
-| Toolchain | gcc 15.2, clang, `perf`, python3, git, stable rustc/cargo 1.99.1 (`~/.cargo/bin`, on the interactive `PATH`). **No `cmake`**: install it before building the harness (ask first). Note that the dev VM builds with Chromium's nightly toolchain; pick one toolchain per comparison and record it. |
+| Toolchain | gcc 15.2, clang, `perf`, python3, git. **Rust: use the host's stable rustc/cargo 1.99.1** (`~/.cargo/bin`, decided 2026-10-30). CMake's `find_program` checks `~/.cargo/bin`, so no override is needed. The dev VM builds with Chromium's nightly toolchain, so numbers from the two machines are never compared. Record `rustc --version` with every result. `cmake`: Ubuntu package `cmake` (4.2.3), installed via apt under a `hostlock shared` hold (see the log in AGENTS.md). |
 | Shared | Other projects (e.g. `chunky`, Chromium campaigns) run builds and measurements here |
 
 ## Reserving the machine: `hostlock`

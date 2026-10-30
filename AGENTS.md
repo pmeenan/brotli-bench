@@ -372,6 +372,11 @@ numbers with the exact command, machine, and commit SHAs.
   off, ASLR kept on for timing runs), the canonical
   `hostlock exclusive` + tuner + `taskset` command, and crash recovery
   (`tune_benchmark_host.py disable`).
+- **2026-10-30** - Perf host toolchain decided: the host's stable
+  rustc/cargo 1.99.1 (not Chromium's nightly) and gcc 15.2. Queued
+  `sudo apt-get install cmake` on `linux` under
+  `hostlock shared --label "brotli-bench: apt install cmake"`. It is waiting
+  behind another project's exclusive measurement (`chunky: cache-bench`).
 
 ## Maintaining documentation
 
