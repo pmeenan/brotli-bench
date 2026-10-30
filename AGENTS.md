@@ -14,6 +14,7 @@ before you finish a task** (see
 | [`docs/baseline.md`](docs/baseline.md) (+ `docs/baseline/`) | Before and after any perf measurement | Pre-optimization numbers, methodology, noise / drift |
 | [`docs/encoder-parity.md`](docs/encoder-parity.md) (+ `docs/encoder-parity/`) | Before touching encoder code; when output changes | Every Rust-vs-C output divergence, root causes, fix patches, repros |
 | [`docs/compound-dictionary-plan.md`](docs/compound-dictionary-plan.md) | Before working on encoder dictionary support | Plan + prototype data for porting C's prepared/compound raw dictionaries (dictionaries larger than the window, q2 extension) |
+| [`docs/upstream/`](docs/upstream/) | Before filing upstream issues | Drafts of upstream bug reports (and whether each is filed) |
 | [`corpora/SOURCES.md`](corpora/SOURCES.md) | Before adding or changing corpora | Provenance, licenses, ratios, rejected candidates |
 | [`README.md`](README.md) | Quick start | Build / usage summary |
 
@@ -310,6 +311,16 @@ numbers with the exact command, machine, and commit SHAs.
     - 8 MB wiki dictionary: 16943 at 72.9 MiB/s, vs Rust 24251 at 28.3.
   - C prepare costs about 110 ms and a 9.8 MB index for an 8 MB dictionary,
     so prepare-once is required.
+- **2026-10-30** - Recorded the compound-dictionary plan decisions:
+  - FFI is lean/borrowed like C;
+  - `SetCustomDictionary` is re-routed to the compound model;
+  - large-dictionary data comes from a fetch script only.
+
+  Confirmed with the C CLI that C ignores raw dictionaries at q4 for inputs
+  >= 1 MiB (H54): a 1.2 MB input gives 180671 bytes with and without `-D`;
+  900 KB uses it. Drafted the google/brotli issue in
+  `docs/upstream/brotli-c-h54-compound-dictionary.md` (not filed). q2 is
+  treated as a deliberate C choice.
 
 ## Maintaining documentation
 

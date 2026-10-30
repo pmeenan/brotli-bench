@@ -1,6 +1,6 @@
 # Plan: compound (prepared) raw dictionaries in the Rust encoder
 
-Status: **proposed**, not started. Owner branch: `compound-dict` (see
+Status: **planned**; decisions recorded under [Decisions](#decisions). Not started. Owner branch: `compound-dict` (see
 [Branching](#branching)). Background: findings D2-D6 in
 [encoder-parity.md](encoder-parity.md) and
 [encoder-parity/dictionary.md](encoder-parity/dictionary.md).
@@ -58,9 +58,9 @@ on every stream.
 | Quality | C today | Rust after this plan | Notes |
 |---|---|---|---|
 | 0-1 | Ignores the dictionary (fast paths) | **Ignore** (same as C and current Rust) | Using it would mean new fast-path designs. q2 is already 1.4-1.7x slower than q1 even without a dictionary (jquery 88 -> 64 MiB/s, wiki 182 -> 107), so silently promoting q0/q1 to q2 would defeat their purpose. Callers who want a dictionary at minimum cost use q2. Possible future work. |
-| 2 | Ignores the dictionary (no compound variant of H2). Still shifts static-dictionary distances by the dictionary size. | **Use the compound index, with a shorter chain walk** (Rust extension) | See the prototype numbers below. Output differs from C by design. Propose the same change to C upstream. |
+| 2 | Ignores the dictionary (no compound variant of H2). Still shifts static-dictionary distances by the dictionary size. | **Use the compound index, with a shorter chain walk** (Rust extension) | See the prototype numbers below. Output differs from C by design. C's q2 behavior is believed to be a deliberate choice by the brotli team, so this is *not* proposed upstream. |
 | 3, 4 | Compound lookup (H3, H4) | Same, **byte-identical** | |
-| 4, size hint >= 1 MiB | Ignores the dictionary (H54 has no compound variant; looks like an oversight) | **Use it** (Rust extension), via a compound variant of H54 | Report upstream. Our corpora are < 1 MiB, so the harness doesn't hit this. |
+| 4, size hint >= 1 MiB | Ignores the dictionary (H54 has no compound variant; looks like an oversight) | **Use it** (Rust extension), via a compound variant of H54 | Confirmed with the C CLI: a 1.2 MB input gives 180671 bytes with and without `-D`. Upstream issue draft: [upstream/brotli-c-h54-compound-dictionary.md](upstream/brotli-c-h54-compound-dictionary.md). If C fixes it, this becomes parity. Our corpora are < 1 MiB, so the harness doesn't hit this. |
 | 5-9 | Compound lookup (H5/H58, H6/H68, H40-42) | Same, **byte-identical** for lgwin >= 17 | At lgwin <= 16, Rust lacks H40-42 (a pre-existing gap); parity there needs those hashers first. |
 | 10-11 | Compound lookup in Zopfli (`LookupAllCompoundDictionaryMatches` + `MergeMatches`) | Same, **byte-identical** | |
 
@@ -214,10 +214,9 @@ matches by construction.
 
 1. **Harness.**
    - `--lgwin` is already added to `brotli_compare` / `bench_*`.
-   - Add large-dictionary cases. Options: a multi-MB dictionary, plus
-     dictionary-larger-than-window cases run at `--lgwin 18`. Commit them only
-     if licensing and size allow; otherwise use a fetch script plus a manifest
-     entry.
+   - Add large-dictionary cases through a fetch script and an opt-in
+     `--set large` (Decision 4). Include multi-MB dictionaries, and
+     dictionary-larger-than-window runs at `--lgwin 18`.
    - Cache the C prepared dictionary per (dictionary, quality) cell instead
      of re-preparing per stream, and report prepare time separately.
    - Add a Rust prepared-dictionary binding in `StandardBrotliApi`, falling
@@ -263,15 +262,44 @@ matches by construction.
     Non-dictionary encodes must not regress beyond noise.
   - Track prepare time and index memory against C.
 
+## Decisions
+
+Recorded 2026-10-30.
+
+1. **Ownership: borrowed ("lean") for the FFI, matching C exactly.**
+   - `BrotliEncoderPrepareDictionary` returns an opaque, immutable handle.
+     It owns only the index (allocated with the caller's `alloc_func` /
+     `free_func`) and *references* the caller's dictionary bytes. The caller
+     keeps the bytes alive until `BrotliEncoderDestroyPreparedDictionary`.
+   - `BrotliEncoderAttachPreparedDictionary` stores a pointer. The prepared
+     dictionary must outlive every encoder it is attached to, and it can be
+     shared by any number of encoders on any number of threads (read-only
+     after creation).
+   - This is C's contract, so a C caller can switch libraries without code
+     or memory-model changes, and nothing multi-MB is copied per encoder.
+   - Inside Rust, `&'static` is forged only at the FFI boundary, as the
+     decoder does in `BrotliDecoderAttachDictionary`.
+   - The safe Rust API gets an owned-or-borrowed wrapper (decoder's
+     `MaybeOwnedSlice` precedent). It doesn't affect C callers and can be
+     refined during review.
+2. **Re-route `BrotliEncoderSetCustomDictionary` / `set_custom_dictionary`**
+   to the compound model. The output change is accepted and will be called
+   out in the upstream PR and release notes.
+3. **Upstream (google/brotli):**
+   - Report the H54 gap (draft above; H35 included as the same omission).
+   - q2 is a deliberate C choice: Rust's q2 dictionary use stays a
+     documented Rust-only divergence.
+4. **Large-dictionary test data comes from a fetch script only; nothing is
+   committed.** Phase 1:
+   - add a script (e.g. `scripts/fetch_large_dicts.sh`) that downloads and
+     assembles multi-MB dictionaries and inputs into a gitignored
+     `corpora/large/`, plus a generated `corpora/large/manifest.tsv`;
+   - give the harness an opt-in case set (e.g. `--set large`) that loads
+     that manifest when present and errors with a hint to run the script
+     when it's not;
+   - default `--verify` stays self-contained.
+
 ## Risks and open questions
-
-- **Ownership API.** How a shared, immutable prepared dictionary is exposed
-  to safe Rust without adding a lifetime to the encoder state. Options:
-  - borrowed `'static` (FFI only);
-  - caller-supplied `SliceWrapper` types (lets std users use `Arc`);
-  - an owned copy (simple, but memory-heavy for multi-MB dictionaries).
-
-  Needs a decision before phase 2.
 - **Rust hasher gaps** (no H40-42 at lgwin <= 16; H6 thresholds differ for
   inputs >= 1 MiB) limit exact parity in those configurations. That is
   independent of this work.
@@ -281,8 +309,7 @@ matches by construction.
 - **Multithreaded / catable path** keeps the prefix model; confirm it's
   unaffected.
 - **Upstream:**
-  - C behaviors we diverge from (q2, H54) should be raised with google/brotli
-    so the two implementations can converge again.
+  - The H54 gap is to be reported to google/brotli (Decision 3).
   - The Rust work goes to dropbox/rust-brotli as a series. Prepared-dictionary
     struct and attach first, then lookups by quality tier, then FFI.
 
