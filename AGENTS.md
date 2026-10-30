@@ -172,8 +172,8 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
   copy that starts in the raw dictionary and runs into the input. Both
   decoders reject the stream (`ERROR_COMPOUND_DICTIONARY`). The corpora don't
   trigger it; the repro in `docs/encoder-parity/repro/dict-span/` does. Fixed
-  on branch `fix-dict-span` (`822b2dc`, patch 0008, finding D5); not pushed
-  or sent upstream yet.
+  on branch `fix-dict-span` (`822b2dc`, patch 0008, finding D5); upstream PR
+  dropbox/rust-brotli#278 (open).
 - [ ] **Encoder output parity.** Rust differs from C at q2-q11; all causes are
   identified in `docs/encoder-parity.md`. Patches 0001-0008 give 204/204
   bit-exact output on the standard cases, but cost 5-15% Rust encode speed at
@@ -284,6 +284,8 @@ numbers with the exact command, machine, and commit SHAs.
   `git -C vendor/<repo> remote set-url origin git@github.com:pmeenan/<repo>.git`,
   or edit the superproject's `submodule.<path>.url` before
   `git submodule update --init`.
+- **2026-10-29** - Opened dropbox/rust-brotli#278 from `fix-dict-span`
+  (`822b2dc`): "Fix matches that run past the end of a custom dictionary".
 
 ## Maintaining documentation
 

@@ -140,6 +140,11 @@ The superproject pins `vendor/rust-brotli` at `perf` (`27a1859`),
 `vendor/brotli-c` at `d89c4b1`. To measure the unpatched baseline encoder,
 check out `master` (`6df909c`) in `vendor/rust-brotli` and rebuild.
 
-Upstream PRs: none opened yet. Candidate standalone decoder cleanup:
+Upstream PRs:
+
+| PR | Branch | Title | State |
+| --- | --- | --- | --- |
+| [dropbox/rust-brotli#278](https://github.com/dropbox/rust-brotli/pull/278) | `fix-dict-span` | Fix matches that run past the end of a custom dictionary | open |
+ Candidate standalone decoder cleanup:
 `extern fn` -> `extern "C" fn` in `src/ffi/mod.rs` (silences ~19
 `missing_abi` warnings).
