@@ -375,8 +375,9 @@ numbers with the exact command, machine, and commit SHAs.
 - **2026-10-30** - Perf host toolchain decided: the host's stable
   rustc/cargo 1.99.1 (not Chromium's nightly) and gcc 15.2. Queued
   `sudo apt-get install cmake` on `linux` under
-  `hostlock shared --label "brotli-bench: apt install cmake"`. It is waiting
-  behind another project's exclusive measurement (`chunky: cache-bench`).
+  `hostlock shared --label "brotli-bench: apt install cmake"`. It waited
+  behind another project's exclusive measurement, then installed: `cmake
+  version 4.2.3` (Ubuntu 4.2.3-2ubuntu2).
 
 ## Maintaining documentation
 
