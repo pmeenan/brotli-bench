@@ -1,8 +1,14 @@
 # Baseline: Rust vs C brotli (2026-10-29)
 
-This is the reference measurement taken before any optimization work. Compare
-future runs against it with
-`scripts/summarize_bench.py NEW.csv --baseline docs/baseline/bench-2026-10-29.csv`.
+Two pre-optimization reference measurements:
+
+- **[Perf host `linux`, 2026-10-30](#perf-host-baseline-linux-2026-10-30):**
+  the reference for all optimization work from now on. It is a physical
+  machine with a tuned, frequency-locked session; compare with
+  `scripts/summarize_bench.py NEW.csv --baseline docs/baseline/bench-2026-10-30-linux.csv`.
+- **GCE dev VM, 2026-10-29** (the sections directly below): the first
+  baseline, plus the encoder-parity analysis. Kept for history; don't compare
+  new perf-host numbers against it.
 
 | Artifact | What |
 | --- | --- |
@@ -233,3 +239,187 @@ python3 scripts/summarize_bench.py /tmp/quick.csv --baseline docs/baseline/bench
 The C-vs-baseline table printed by `--baseline` shows run-to-run drift, since
 the C code doesn't change between runs. Treat Rust changes smaller than that
 drift as noise.
+
+---
+
+## Perf host baseline: `linux` (2026-10-30)
+
+**This is the reference for all decoder optimization work.** All future
+performance numbers come from this host
+([perf-host.md](perf-host.md)). Compare against it with
+`scripts/summarize_bench.py NEW.csv --baseline docs/baseline/bench-2026-10-30-linux.csv`.
+Never compare numbers across hosts.
+
+| Artifact | What |
+| --- | --- |
+| [baseline/bench-2026-10-30-linux.csv](baseline/bench-2026-10-30-linux.csv) | Raw bench results, 600 cells (same case selection as above) |
+| [baseline/bench-2026-10-30-linux.txt](baseline/bench-2026-10-30-linux.txt) | Console output |
+| [baseline/bench-2026-10-30-linux-details.md](baseline/bench-2026-10-30-linux-details.md) | Per-case tables (generated) |
+| [baseline/verify-2026-10-30-linux.csv](baseline/verify-2026-10-30-linux.csv) | `--verify` on the host: 600/600 decode parity, 440/600 bit-exact |
+| [baseline/environment-2026-10-30-linux.md](baseline/environment-2026-10-30-linux.md) | Commits, toolchain, machine, and host state before and after the session |
+| [baseline/tune-report-2026-10-30-linux.json](baseline/tune-report-2026-10-30-linux.json) | `tune_benchmark_host.py` report: sysfs before, during and restored, plus observations |
+
+### Setup
+
+- **Machine:** Intel Core i9-11900KF (Rocket Lake), Ubuntu kernel 7.0.
+- **Session:**
+  - `hostlock exclusive` + `tune_benchmark_host.py run --keep-aslr`;
+  - turbo off, `performance` governor and EPP, min = max = **3.5 GHz**;
+  - NMI watchdog off, SMT off (CPUs 0-7 online), ASLR on;
+  - `taskset -c 2`.
+  - The frequency stayed at 3.5 GHz and the throttle counters stayed at 0
+    throughout. Load average was about 1.0 (the session itself), and the
+    tuner restored every setting afterwards.
+- **Code:**
+  - brotli-c `d89c4b1`.
+  - rust-brotli **`27a1859` (`perf` = `fix-dict-span` + `parity`)**. This is
+    not the unpatched `6df909c` used on GCE above, so encoder numbers here
+    include the parity patches' costs.
+  - rust-brotli-decompressor `2ed02ed` (unchanged).
+- **Toolchain:**
+  - gcc 15.2 `-O3 -march=native`;
+  - the host's **stable** rustc 1.99.1, `-C target-cpu=native`, fat LTO,
+    `panic=abort`;
+  - cmake 4.2.3.
+- **Command:** the full run took 17 minutes, followed by the 1-byte
+  fixed-cost table in the same session:
+  ```bash
+  hostlock exclusive --label "brotli-bench: linux baseline" -- \
+    python3 ~/src/ai-skills/optimize-campaign/scripts/tune_benchmark_host.py run --keep-aslr --report tune-report.json -- \
+      bash run_baseline_inner.sh   # taskset -c 2 brotli_compare --bench --set all --corpus "<as above>" ...
+  ```
+- **Noise:**
+  - Median half-IQR spread: 0.5% (C encode), 0.6% (Rust encode), 1.5-1.6%
+    (decode).
+  - p90 spread: 1.6% / 1.9% (encode), 2.3-2.5% (decode).
+  - Encode is much steadier than on GCE.
+
+### Headline numbers (linux)
+
+#### Decode: Rust vs C throughput (geomean)
+
+Both decoders decode the same C-encoded stream. Negative = Rust slower.
+
+| Q | static standard | static dictionary | flushed standard | flushed dictionary |
+|---:|---:|---:|---:|---:|
+| 0 | -6.2% | -6.1% | -6.9% | -6.3% |
+| 1 | -7.6% | -7.9% | -6.9% | -6.9% |
+| 2 | -7.5% | -6.8% | -7.2% | -6.4% |
+| 3 | -6.1% | -8.7% | -5.9% | -9.5% |
+| 4 | -5.0% | -9.2% | -7.1% | -11.1% |
+| 5 | -4.1% | -9.5% | -6.5% | -11.0% |
+| 6 | -4.1% | -9.4% | -6.6% | -11.1% |
+| 7 | -4.3% | -9.4% | -6.6% | -11.1% |
+| 8 | -4.3% | -9.6% | -6.6% | -11.1% |
+| 9 | -4.4% | -9.2% | -6.6% | -11.0% |
+| 10 | -0.5% | -8.5% | -3.3% | -11.0% |
+| 11 | -1.1% | -7.8% | -4.3% | -10.5% |
+| **all** | -4.6% | -8.5% | -6.2% | -9.8% |
+
+#### Encode: Rust vs C throughput (geomean)
+
+Each encoder produces its own stream (see sizes). Negative = Rust slower.
+
+| Q | static standard | static dictionary | flushed standard | flushed dictionary |
+|---:|---:|---:|---:|---:|
+| 0 | -33.2% | +145.5% | -19.7% | +77.4% |
+| 1 | -36.2% | +93.7% | -29.5% | +55.9% |
+| 2 | -32.3% | +94.6% | -26.7% | +96.2% |
+| 3 | -25.9% | +109.9% | -18.2% | +85.4% |
+| 4 | -17.7% | +98.6% | -12.6% | +71.5% |
+| 5 | -24.1% | +53.2% | -21.0% | +41.9% |
+| 6 | -28.8% | +39.2% | -25.7% | +31.8% |
+| 7 | -37.5% | +13.3% | -34.8% | +10.8% |
+| 8 | -44.6% | -4.7% | -41.7% | -4.6% |
+| 9 | -37.7% | -19.8% | -36.9% | -18.5% |
+| 10 | -40.0% | -36.1% | -38.8% | -28.7% |
+| 11 | -25.8% | -25.9% | -26.2% | -19.3% |
+| **all** | -32.4% | +34.1% | -28.2% | +26.0% |
+
+#### Compressed size (Rust vs C, geomean) and bit-exact cells
+
+Positive = Rust output larger. `exact` = cells where the Rust stream is byte-identical to C.
+
+| Q | static standard | static dictionary | flushed standard | flushed dictionary |
+|---:|---:|---:|---:|---:|
+| 0 | +0.0% (17/17 exact) | +0.0% (8/8 exact) | +0.0% (17/17 exact) | +0.0% (8/8 exact) |
+| 1 | +0.0% (17/17 exact) | +0.0% (8/8 exact) | +0.0% (17/17 exact) | +0.0% (8/8 exact) |
+| 2 | +0.0% (17/17 exact) | -67.5% (0/8 exact) | +0.0% (17/17 exact) | -60.7% (0/8 exact) |
+| 3 | +0.0% (17/17 exact) | +41.3% (0/8 exact) | +0.0% (17/17 exact) | +28.9% (0/8 exact) |
+| 4 | +0.0% (17/17 exact) | +28.8% (0/8 exact) | +0.0% (17/17 exact) | +21.5% (0/8 exact) |
+| 5 | +0.0% (17/17 exact) | +11.6% (0/8 exact) | +0.0% (17/17 exact) | +6.0% (0/8 exact) |
+| 6 | +0.0% (17/17 exact) | +5.0% (0/8 exact) | +0.0% (17/17 exact) | +3.0% (0/8 exact) |
+| 7 | +0.0% (17/17 exact) | +0.9% (0/8 exact) | +0.0% (17/17 exact) | +0.6% (0/8 exact) |
+| 8 | +0.0% (17/17 exact) | -0.6% (0/8 exact) | +0.0% (17/17 exact) | -0.1% (0/8 exact) |
+| 9 | +0.0% (17/17 exact) | -1.0% (0/8 exact) | +0.0% (17/17 exact) | -1.3% (0/8 exact) |
+| 10 | +0.0% (17/17 exact) | -0.1% (0/8 exact) | +0.0% (17/17 exact) | +0.8% (0/8 exact) |
+| 11 | +0.0% (17/17 exact) | +0.2% (0/8 exact) | +0.0% (17/17 exact) | +0.9% (0/8 exact) |
+
+Typical absolute throughput at 3.5 GHz (medians over the 16 standard cases
+excluding `monkey`; MiB/s, static mode; last column is the median flushed
+per-chunk decode latency):
+
+| Q | C enc | Rust enc | C dec | Rust dec | Flushed chunk latency C / Rust (us) |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 293.3 | 192.2 | 320.4 | 300.1 | 16.3 / 17.3 |
+| 1 | 224.3 | 140.4 | 333.6 | 307.9 | 16.9 / 18.1 |
+| 2 | 105.4 | 77.0 | 348.6 | 337.6 | 13.8 / 14.6 |
+| 3 | 89.5 | 70.1 | 365.0 | 354.1 | 13.4 / 14.1 |
+| 4 | 57.7 | 50.5 | 391.1 | 388.0 | 13.1 / 13.7 |
+| 5 | 41.3 | 34.0 | 418.5 | 419.6 | 12.4 / 12.9 |
+| 6 | 37.2 | 29.7 | 432.5 | 433.9 | 12.1 / 12.6 |
+| 7 | 31.4 | 22.5 | 438.1 | 439.0 | 11.9 / 12.4 |
+| 8 | 29.4 | 18.8 | 445.7 | 446.0 | 11.7 / 12.3 |
+| 9 | 10.4 | 7.3 | 446.8 | 446.2 | 11.7 / 12.3 |
+| 10 | 2.0 | 1.4 | 320.1 | 327.1 | 15.6 / 15.8 |
+| 11 | 0.7 | 0.6 | 364.4 | 374.2 | 14.4 / 14.7 |
+
+Fixed per-stream cost (1-byte input, median per stream, same session):
+
+| Op | Q | C (us) | Rust (us) |
+|---|---:|---:|---:|
+| encode | 0 | 3.50 | 4.66 |
+| encode | 1 | 0.55 | 0.76 |
+| encode | 2 | 0.30 | 4.69 |
+| encode | 3 | 0.31 | 4.70 |
+| encode | 4 | 0.30 | 10.93 |
+| encode | 5 | 0.36 | 54.57 |
+| encode | 6 | 0.35 | 112.89 |
+| encode | 7 | 0.33 | 447.38 |
+| encode | 8 | 0.33 | 890.78 |
+| encode | 9 | 4.58 | 12890.76 |
+| encode | 10 | 14.04 | 12914.72 |
+| encode | 11 | 15.51 | 12888.30 |
+| decode | - | 0.34 | 0.46 |
+| decode (64KB dictionary) | - | 0.38 | 0.49 |
+
+### Observations (linux vs GCE)
+
+1. **The decoder gap depends on the microarchitecture.**
+   - On Rocket Lake at 3.5 GHz, Rust decode is -4.6% (static) / -6.2%
+     (flushed) on the standard cases, vs -11.6% / -13.5% on the Skylake-SP
+     VM.
+   - Per-quality *medians* are close to C at q4-q11 static, but the geomean
+     is still negative.
+   - q0-q2 remain the worst standard cells (-6 to -8%).
+   - Decoder changes should be confirmed on more than one CPU before
+     claiming parity. Chromium also ships arm64.
+2. **Dictionary decode is now the largest relative gap:** -8.5% static /
+   -9.8% flushed, about twice the standard-case gap. It is about -9 to -11%
+   at q3-q11. This raises the priority of decoder workstream 6
+   (dictionary decode) in [decoder-perf-plan.md](decoder-perf-plan.md).
+3. **Fixed per-stream decode cost:** 0.34 us (C) vs 0.46 us (Rust), and
+   0.38 vs 0.49 us with a dictionary. The ratio is the same as on GCE.
+4. **Encoder, now on the parity branch:**
+   - Output is bit-exact with C on all standard cells. Dictionary cells are
+     exact at q0/q1; q2-q11 are still the D2/D3 model differences.
+   - Speed is -32% static overall.
+   - **New issue: q9 small-input setup.** The 1-byte q9 encode now costs
+     about 12.9 ms (C: 4.6 us). Parity patch 0003 switched q9 to H5 with
+     `block_bits=8`, whose large tables Rust allocates and clears up front,
+     whereas C sizes them to the input. q9 encode throughput is -38% vs -19%
+     for the unpatched encoder on GCE.
+   - q10/q11 setup is likewise about 12.9 ms. That's slower than on GCE,
+     likely page faults with THP set to `madvise` here.
+   - Encoder work is tabled, but this belongs on the encoder perf list (see
+     AGENTS.md known issues).

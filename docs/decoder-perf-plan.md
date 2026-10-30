@@ -20,9 +20,11 @@ for Chrome-style streaming, without changing behavior:
   - with and without raw dictionaries (Compression Dictionary Transport),
     including dictionaries larger than the window;
   - qualities 0-11, since servers use all of them.
-- **Target:** geomean Rust/C decode throughput >= 1.00 in every
-  (mode x case set) column of the baseline table, with no individual cell
-  worse than -3%.
+- **Target:** on the perf host, geomean Rust/C decode throughput >= 1.00 in
+  every (mode x case set) column of the baseline table, with no individual
+  cell worse than -3%. Spot-check the final result on a second
+  microarchitecture (the gap differed a lot between Skylake-SP and Rocket
+  Lake).
 - **Constraints:**
   - Keep the crate upstreamable to dropbox/rust-brotli-decompressor.
   - **No `unsafe`, period.** The decoder is going into Chromium for its
@@ -40,9 +42,28 @@ for Chrome-style streaming, without changing behavior:
     - If safe rewrites plateau short of C, document the remaining gap. Don't
       reach for `unsafe`.
 
-## Where we are (baseline 2026-10-29, [baseline.md](baseline.md))
+## Where we are
 
-Rust vs C decode throughput, geomean (negative = Rust slower):
+**Perf host `linux` (the reference; [baseline.md](baseline.md#perf-host-baseline-linux-2026-10-30)):**
+i9-11900KF locked at 3.5 GHz. Rust vs C decode throughput, geomean
+(negative = Rust slower):
+
+| | Static | Flushed |
+|---|---:|---:|
+| Standard cases | -4.6% | -6.2% |
+| Dictionary cases | -8.5% | -9.8% |
+
+On that host:
+- **q0-q2:** -6 to -8%.
+- **q3-q9:** -4 to -7% standard, -9 to -11% with a dictionary.
+- **q10/q11:** -0.5 to -4% standard, -8 to -11% with a dictionary.
+- **Fixed cost per stream:** 0.34 us (C) vs 0.46 us (Rust).
+
+The dictionary decode gap is about twice the standard gap there, so
+workstream 6 matters more than its position in the list suggests.
+
+**GCE dev VM, 2026-10-29 (Skylake-SP; history):** a larger gap, which shows
+the result depends on the microarchitecture.
 
 | | Static | Flushed |
 |---|---:|---:|

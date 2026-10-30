@@ -129,8 +129,8 @@ A/B deltas within the same tuned configuration only.
    command above), pinned to a single core (`taskset -c 2`; SMT is off
    during the session). Run the baseline build and the candidate
    back-to-back inside the same session, and keep the `--report` file.
-5. **This host needs its own reference numbers.** Before the first decoder
-   change, record a dated baseline here (e.g.
-   `docs/baseline/bench-<date>-linux.csv`, plus an environment file). Add it
-   as a new section in `baseline.md` per the AGENTS.md doc rules, then
-   compare only within this host.
+5. **Compare only within this host.** Its reference is
+   `docs/baseline/bench-2026-10-30-linux.csv` (environment file and tuner
+   report next to it; see baseline.md). Recorded with a synced working tree
+   in `~/src/brotli-bench` and the session script in
+   `~/scratch/run_baseline_inner.sh`.

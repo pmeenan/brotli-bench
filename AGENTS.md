@@ -106,7 +106,7 @@ cmake --build build -j
 ./build/brotli_compare --bench --corpus wiki-Brotli.html,dict:jquery --mode flushed --quality 4-6
 
 # Compare against the baseline
-python3 scripts/summarize_bench.py /tmp/new.csv --baseline docs/baseline/bench-2026-10-29.csv
+python3 scripts/summarize_bench.py /tmp/new.csv --baseline docs/baseline/bench-2026-10-30-linux.csv   # perf host reference
 
 # Single-implementation profiling (prints median_time per stream, too)
 perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
@@ -212,6 +212,11 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
   at q10/q11, vs under 1 us for C (about 20 us at q9-q11). See
   `docs/baseline.md`. This is likely the biggest win for small or streamed
   responses.
+- [ ] **The parity series makes Rust q9 small-input setup very slow.** Patch
+  0003 (H5 at q9, as in C) costs about 12.9 ms for a 1-byte encode, vs
+  4.6 us for C: Rust allocates and clears the full H5 `block_bits=8` tables
+  up front. q9 encode is -38% vs C on the perf host. This is encoder perf
+  work, tabled.
 - [ ] **Dictionary model differs (D3).** C uses a separate compound
   dictionary index; Rust prepends the dictionary to the window
   (`BrotliEncoderSetCustomDictionary`). Rust has no
@@ -381,6 +386,22 @@ numbers with the exact command, machine, and commit SHAs.
 - **2026-10-30** - `hostlock`'s quiet wait now uses the 1-minute load
   average (< 0.5) or the 5-minute one (< 1.0), whichever comes first,
   instead of the 15-minute one. Updated `docs/perf-host.md`.
+- **2026-10-30** - Perf host baseline recorded on `linux`. Synced the
+  working tree to `~/src/brotli-bench`, built with stable Rust 1.99.1 under
+  `hostlock shared`; `--verify` gave 600/600 decode parity and 440/600
+  bit-exact. The session took 17 min plus the fixed-cost table, with zero
+  throttling.
+  - Ran under `hostlock exclusive` + `tune_benchmark_host.py run --keep-aslr`
+    (3.5 GHz locked, SMT off), `taskset -c 2`.
+  - Files: `docs/baseline/bench-2026-10-30-linux.csv`, environment file and
+    tuner report.
+  - Rust vs C decode geomean: standard -4.6% static / -6.2% flushed;
+    dictionary -8.5% / -9.8%.
+  - The gap is much smaller than on the GCE Skylake-SP VM, so it depends on
+    the microarchitecture, and dictionary decode is now the largest relative
+    gap.
+  - Encoder (parity branch): -32% static. New finding: q9 1-byte setup
+    takes 12.9 ms (patch 0003). See `docs/baseline.md`.
 
 ## Maintaining documentation
 
