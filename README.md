@@ -20,12 +20,12 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-Optional CMake cache variables: `CARGO_EXECUTABLE`, `BROTLI_BENCH_RUST_LTO` (default `fat`), `BROTLI_BENCH_RUST_PANIC` (default `abort`), `BROTLI_BENCH_RUSTFLAGS` (default `-C target-cpu=native`).
+Optional CMake cache variables: `CARGO_EXECUTABLE`, `BROTLI_BENCH_RUST_LTO` (default `fat`), `BROTLI_BENCH_RUST_PANIC` (default `abort`), `BROTLI_BENCH_RUSTFLAGS` (default `-C target-cpu=native`), `BROTLI_BENCH_C_ARCH_FLAGS` (default `-march=native`).
 
 This builds three executables in `build/`:
 1. `bench_c`: Pure C reference binary linked against `libbrotli_c.a`.
-2. `bench_rust`: Pure Rust-FFI drop-in binary compiled from the exact same C++ source and `<brotli/*.h>` headers as `bench_c`, linked against `libbrotli_bench_ffi.a`.
-3. `brotli_compare`: Side-by-side differential verification and benchmark binary linking both the Rust FFI and the symbol-prefixed `libbrotli_c_prefixed.a` (`C_Brotli*`).
+2. `bench_rust`: Pure Rust binary compiled from the exact same C++ source and `<brotli/*.h>` headers as `bench_c`, linked against `libbrotli_bench_ffi.a`. Supports `--rust-api <ffi|direct>` (default `ffi`) to benchmark either the C FFI (`BrotliDecoderDecompressStream`) or a thin wrapper around the direct Rust streaming decoder (`BrotliState::new` + `BrotliDecompressStream`).
+3. `brotli_compare`: Side-by-side differential verification and benchmark binary linking both the Rust wrapper (`--rust-api <ffi|direct>`) and the symbol-prefixed `libbrotli_c_prefixed.a` (`C_Brotli*`).
 
 All three also link `libbrotli_c_prefixed.a`, which `bench_c` / `bench_rust` use only to pre-encode decode workloads so both decode byte-identical C-encoded streams.
 
@@ -49,6 +49,7 @@ Provenance, licenses, and compression ratios are in [corpora/SOURCES.md](corpora
 ### 2. Side-by-Side Benchmark Suite
 ```bash
 ./build/brotli_compare --bench                          # default case subset, q0-11
+./build/brotli_compare --bench --decode-only --rust-api direct   # decode-only, direct Rust API
 # Filter by case (comma-separated names, substrings, or file paths), mode, or quality:
 ./build/brotli_compare --bench --corpus wiki-Brotli.html,dict:jquery --mode flushed --quality 5
 ```

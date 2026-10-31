@@ -27,6 +27,7 @@ struct BenchOptions {
   size_t chunk_size = 0;  // 0 means use mode default (4KB flushed, 16KB static)
   std::string input_path = "vendor/brotli-c/tests/testdata/alice29.txt";
   std::string dictionary_path;
+  std::string rust_api = "ffi";
   int iterations = 50;
   int warmup = 1;
 };
@@ -43,6 +44,8 @@ void PrintUsage(const char* prog) {
       << "                           (default: 4096 flushed, 16384 static)\n"
       << "  --input <path>           Input file path (default: alice29.txt)\n"
       << "  --dictionary <path>      Raw (prefix) dictionary to attach\n"
+      << "  --rust-api <ffi|direct>  Rust decoder API: C FFI or direct Rust API\n"
+      << "                           (bench_rust only, default: ffi)\n"
       << "  --iterations <n>         Number of timed iterations (default: 50)\n"
       << "  --warmup <n>             Untimed warmup iterations (default: 1)\n"
       << "  --help                   Show this help message\n"
@@ -99,6 +102,16 @@ bool ParseArgs(int argc, char** argv, BenchOptions* opts) {
       opts->input_path = v;
     } else if (arg == "--dictionary" && value(&v)) {
       opts->dictionary_path = v;
+    } else if (arg == "--rust-api" && value(&v)) {
+#if !defined(BROTLI_BENCH_STANDARD_API_IS_RUST)
+      std::cerr << "--rust-api is only supported in bench_rust\n";
+      return false;
+#endif
+      if (v != "ffi" && v != "direct") {
+        std::cerr << "Invalid --rust-api '" << v << "': expected ffi|direct\n";
+        return false;
+      }
+      opts->rust_api = v;
     } else if (arg == "--iterations" && value(&v)) {
       if (!ParseInt64(v, 1, 100000000, &n)) {
         std::cerr << "Invalid --iterations '" << v << "': expected > 0\n";
@@ -214,10 +227,15 @@ int main(int argc, char** argv) {
   dec_opts.dictionary = params.dictionary;
   dec_opts.expected_output_size = input.size();
 
+  auto decode_once = [&](const DecodeOptions& o) {
+    return opts.rust_api == "direct"
+               ? DecodeStream<RustDirectBrotliApi>(config, artifact, o)
+               : DecodeStream<StandardBrotliApi>(config, artifact, o);
+  };
+
   // First run captures and verifies output; it doubles as warmup.
   dec_opts.capture_output = true;
-  DecodeResult check = DecodeStream<StandardBrotliApi>(config, artifact,
-                                                       dec_opts);
+  DecodeResult check = decode_once(dec_opts);
   if (!check.ok || check.decoded_bytes != input) {
     std::cerr << "Decode verification failed: "
               << (check.ok ? "output mismatch" : check.error_message) << "\n";
@@ -230,8 +248,7 @@ int main(int argc, char** argv) {
   chunk_us_samples.reserve(opts.iterations);
   const int extra_warmup = opts.warmup > 1 ? opts.warmup - 1 : 0;
   for (int iter = -extra_warmup; iter < opts.iterations; ++iter) {
-    DecodeResult dec = DecodeStream<StandardBrotliApi>(config, artifact,
-                                                       dec_opts);
+    DecodeResult dec = decode_once(dec_opts);
     if (!dec.ok) {
       std::cerr << "Decode failed: " << dec.error_message << "\n";
       return 1;

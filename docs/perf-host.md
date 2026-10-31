@@ -134,3 +134,27 @@ A/B deltas within the same tuned configuration only.
    report next to it; see baseline.md). Recorded with a synced working tree
    in `~/src/brotli-bench` and the session script in
    `~/scratch/run_baseline_inner.sh`.
+
+## Additional ARM benchmark platforms (reachable from `linux`)
+
+To verify that performance changes hold across microarchitectures beyond x86-64,
+two ARM platforms are reachable from `linux`:
+
+### 1. Apple M5 Max MacBook Pro (`ssh mac` from `linux`)
+
+| | |
+|---|---|
+| SSH | `ssh linux 'ssh mac ...'` (`mac.meenan.us`, Darwin 27.0.0 `arm64`) |
+| CPU | Apple M5 Max (18 cores, 64-bit `aarch64`) |
+| Toolchain | Apple clang 21.0 (`clang++ -O3 -mcpu=native`), cross-compiled Rust staticlib (`--target aarch64-apple-darwin` from `linux` with `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/bin/true`) linked natively on `mac` |
+| Power management | **Always wrap benchmark commands in `caffeinate -i -s`** on `mac` so macOS does not enter system sleep mid-run |
+
+### 2. Android ARM Cortex-A53 (`adb` on `linux`)
+
+| | |
+|---|---|
+| ADB | Connected via USB to `linux` (`adb devices` -> `ZY22HXWPS2`, `moto g play - 2023`) |
+| SoC / CPU | MediaTek MT6765H, 8x ARM Cortex-A53 (`0xd03`, in-order): `cpu0..3` @ 2.30 GHz (`schedutil`), `cpu4..7` @ 1.80 GHz |
+| OS / ABI | Android 12 (kernel 4.19.191+), 32-bit `armv7l` userspace (`ro.product.cpu.abi=armeabi-v7a`) |
+| Toolchain | `arm-linux-gnueabihf-gcc` / `g++ -O3 -mcpu=cortex-a53 -static` + Rust `--target armv7-unknown-linux-gnueabihf` (`CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=/bin/true`) |
+| Pinning | Pin to a 2.30 GHz core in the faster cluster (`taskset 04`, i.e. `cpu2`) and run from `/data/local/tmp/brotli-bench` |

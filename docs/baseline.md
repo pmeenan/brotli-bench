@@ -530,29 +530,97 @@ Fixed per-stream decode cost (1-byte input, 50,000 iterations, same session):
 | decode | 0.34 | 0.46 | 0.43 |
 | decode (64KB dictionary) | 0.34 | 0.49 | 0.45 |
 
-### Second microarchitecture spot-check: GCE Skylake-SP (2026-10-30)
+### Multi-platform, build-flag, and API comparison (2026-10-30)
 
-Measured on the GCE Skylake-SP 2.0 GHz dev VM (`taskset -c 2`, 300 cells across
-`q0,2,5,8,10,11`, compared against `docs/baseline/bench-2026-10-29.csv`):
+Measured on the 144-cell default benchmark subset (`kDefaultBenchCases`:
+`alice29.txt`, `jquery-3.7.1.min.js`, `bootstrap-5.3.3.min.css`,
+`wiki-Brotli.html`, `dict:jquery-3.6.4-to-3.7.1.min.js`,
+`dict:wiki-html-Brotli`, `q0..11`, `static` + `flushed`) across four platforms,
+two x86-64 build configurations, and both Rust integration APIs (`--rust-api ffi`
+calling `BrotliDecoderDecompressStream` vs `--rust-api direct` calling
+`BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>` +
+`BrotliDecompressStream` directly):
 
-| Mode & set | Rust vs C (before) | Rust vs C (after) | Rust decode vs 2026-10-29 baseline |
-|---|---:|---:|---:|
-| static standard | -11.6% | -3.3% | **+7.7%** |
-| static dictionary | -12.9% | **+4.0%** | **+15.5%** |
-| flushed standard | -13.5% | -1.5% | **+12.0%** |
-| flushed dictionary | -14.8% | **+3.1%** | **+17.5%** |
+| Artifact | Platform & Config |
+| --- | --- |
+| [baseline/bench-2026-10-30-linux-native-ffi.csv](baseline/bench-2026-10-30-linux-native-ffi.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`081c5d9`), C FFI |
+| [baseline/bench-2026-10-30-linux-native-direct.csv](baseline/bench-2026-10-30-linux-native-direct.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`081c5d9`), Direct Rust API |
+| [baseline/bench-2026-10-30-linux-generic-base-ffi.csv](baseline/bench-2026-10-30-linux-generic-base-ffi.csv) | `linux` (i9-11900KF @ 3.5 GHz), generic `x86-64` + ThinLTO, baseline (`2ed02ed`), C FFI |
+| [baseline/bench-2026-10-30-linux-generic-perf-ffi.csv](baseline/bench-2026-10-30-linux-generic-perf-ffi.csv) | `linux` (i9-11900KF @ 3.5 GHz), generic `x86-64` + ThinLTO, `perf` (`081c5d9`), C FFI |
+| [baseline/bench-2026-10-30-linux-generic-perf-direct.csv](baseline/bench-2026-10-30-linux-generic-perf-direct.csv) | `linux` (i9-11900KF @ 3.5 GHz), generic `x86-64` + ThinLTO, `perf` (`081c5d9`), Direct Rust API |
+| [baseline/bench-2026-10-30-mac-base-ffi.csv](baseline/bench-2026-10-30-mac-base-ffi.csv) | `mac` (Apple M5 Max `arm64`), baseline (`2ed02ed`), C FFI |
+| [baseline/bench-2026-10-30-mac-perf-ffi.csv](baseline/bench-2026-10-30-mac-perf-ffi.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`081c5d9`), C FFI |
+| [baseline/bench-2026-10-30-mac-perf-direct.csv](baseline/bench-2026-10-30-mac-perf-direct.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`081c5d9`), Direct Rust API |
+| [baseline/bench-2026-10-30-android-base-ffi.csv](baseline/bench-2026-10-30-android-base-ffi.csv) | Android (`moto g play - 2023`, Cortex-A53 @ 2.30 GHz `cpu2`, 32-bit `armv7l`), baseline (`2ed02ed`), C FFI |
+| [baseline/bench-2026-10-30-android-perf-ffi.csv](baseline/bench-2026-10-30-android-perf-ffi.csv) | Android (Cortex-A53 @ 2.30 GHz `cpu2`, 32-bit `armv7l`), `perf` (`081c5d9`), C FFI |
+| [baseline/bench-2026-10-30-android-perf-direct.csv](baseline/bench-2026-10-30-android-perf-direct.csv) | Android (Cortex-A53 @ 2.30 GHz `cpu2`, 32-bit `armv7l`), `perf` (`081c5d9`), Direct Rust API |
+
+#### Decode throughput summary across platforms, build flags, and APIs (geomean)
+
+| Platform & Config | `static standard` vs C (vs base) | `static dictionary` vs C (vs base) | `flushed standard` vs C (vs base) | `flushed dictionary` vs C (vs base) |
+| --- | --- | --- | --- | --- |
+| **`linux` i9-11900KF (native + fat LTO, 600 cells)** — Baseline (`2ed02ed`, FFI) | -4.6% | -8.5% | -6.2% | -9.8% |
+| **`linux` i9-11900KF (native + fat LTO, 600 cells)** — `perf` (`081c5d9`, FFI) | **+1.8%** (+6.7%) | **+6.4%** (+16.7%) | **+2.7%** (+10.3%) | **+6.3%** (+19.2%) |
+| **`linux` i9-11900KF (native + fat LTO, 144 cells)** — `perf` (`081c5d9`, FFI) | **+2.3%** | **+9.5%** | **+4.1%** | **+7.5%** |
+| **`linux` i9-11900KF (native + fat LTO, 144 cells)** — `perf` (`081c5d9`, Direct) | **+2.6%** (+0.3% vs FFI) | **+9.8%** (+0.4% vs FFI) | **+4.2%** (+0.2% vs FFI) | **+7.8%** (+0.4% vs FFI) |
+| **`linux` i9-11900KF (generic `x86-64` + ThinLTO, 144 cells)** — Baseline (`2ed02ed`, FFI) | -10.5% | -10.2% | -12.5% | -13.9% |
+| **`linux` i9-11900KF (generic `x86-64` + ThinLTO, 144 cells)** — `perf` (`081c5d9`, FFI) | -4.2% (**+7.1%**) | **+4.6%** (**+17.0%**) | -4.9% (**+9.5%**) | -0.3% (**+15.6%**) |
+| **`linux` i9-11900KF (generic `x86-64` + ThinLTO, 144 cells)** — `perf` (`081c5d9`, Direct) | -3.9% (**+7.5%**) | **+4.2%** (**+16.5%**) | -4.6% (**+9.8%**) | **+0.4%** (**+16.4%**) |
+| **`mac` Apple M5 Max (`arm64`, 144 cells)** — Baseline (`2ed02ed`, FFI) | -0.3% | -6.9% | -6.5% | -11.9% |
+| **`mac` Apple M5 Max (`arm64`, 144 cells)** — `perf` (`081c5d9`, FFI) | **+8.7%** (**+9.8%**) | **+5.8%** (**+14.2%**) | **+7.4%** (**+15.3%**) | **+6.7%** (**+22.3%**) |
+| **`mac` Apple M5 Max (`arm64`, 144 cells)** — `perf` (`081c5d9`, Direct) | **+11.8%** (**+12.7%**) | **+8.2%** (**+17.1%**) | **+11.2%** (**+18.6%**) | **+10.2%** (**+25.5%**) |
+| **Android Cortex-A53 (`armv7l` 32-bit, 144 cells)** — Baseline (`2ed02ed`, FFI) | -29.7% | -27.7% | -33.4% | -33.5% |
+| **Android Cortex-A53 (`armv7l` 32-bit, 144 cells)** — `perf` (`081c5d9`, FFI) | -24.1% (**+9.1%**) | -16.7% (**+15.9%**) | -23.5% (**+15.3%**) | -19.7% (**+18.9%**) |
+| **Android Cortex-A53 (`armv7l` 32-bit, 144 cells)** — `perf` (`081c5d9`, Direct) | -20.9% (**+13.9%**) | -12.0% (**+22.6%**) | -20.2% (**+20.2%**) | -14.2% (**+28.3%**) |
+| **GCE Skylake-SP (`x86-64`, 300 cells)** — `perf` (`081c5d9`, FFI vs 2026-10-29 base) | -3.3% (**+7.7%**) | **+4.0%** (**+15.5%**) | -1.5% (**+12.0%**) | **+3.1%** (**+17.5%**) |
+
+#### 1-byte fixed per-stream decode cost across platforms and APIs (`q6 static`)
+
+| Platform | Dictionary | C (us) | Rust FFI (`081c5d9`, us) | Rust Direct (`081c5d9`, us) | Direct vs C | Direct vs FFI |
+| --- | --- | --- | --- | --- | --- | --- |
+| `linux` (i9-11900KF @ 3.5 GHz, 50k iters) | none | 0.33 | 0.44 | **0.29** | **-12% faster** | **-34% lower** |
+| `linux` (i9-11900KF @ 3.5 GHz, 50k iters) | 64 KB (`wiki-html.dict`) | 0.40 | 0.46 | **0.31** | **-23% faster** | **-33% lower** |
+| `mac` (Apple M5 Max, 50k iters) | none | 0.21 | 0.42 | **0.21** | **0% (ties C)** | **-50% lower** |
+| `mac` (Apple M5 Max, 50k iters) | 64 KB (`wiki-html.dict`) | 0.21 | 0.25 | **0.12** | **-43% faster** | **-52% lower** |
+| Android (Cortex-A53 @ 2.30 GHz, 10k iters) | none | 2.15 | 4.23 | **3.08** | +43% slower | **-27% lower** |
+| Android (Cortex-A53 @ 2.30 GHz, 10k iters) | 64 KB (`wiki-html.dict`) | 2.46 | 4.31 | **3.15** | +28% slower | **-27% lower** |
 
 ### Observations (post-optimization)
 
-1. **All 4 `(mode x case set)` columns beat C on `linux`:** `+1.8%` (static
-   standard), `+6.4%` (static dictionary), `+2.7%` (flushed standard), and
-   `+6.3%` (flushed dictionary). Every cell in the 48-cell quality summary
-   table is `>= -0.1%` (47 of 48 positive).
-2. **Median static decode throughput and flushed chunk latency beat C at every
-   quality `0..11`.**
-3. **Remaining fixed allocation zeroing on tiny single-metablock streams:**
-   in safe Rust, allocating `&mut [u8]` for the ringbuffer requires zero-filling
-   (`calloc`). On ultra-short streams that still allocate a full ringbuffer
-   (such as `dict:bootstrap-5.3.2-to-5.3.3.min.css`, a 193-byte delta stream
-   that decodes 227 KB in ~15 us in C vs ~19 us in Rust, or `monkey`), that
-   zero-fill accounts for the remaining ~3-4 us per-stream difference.
+1. **All 4 `(mode x case set)` columns beat C on `linux` (native) and `mac`
+   (Apple M5 Max `arm64`):**
+   - On `linux` (600 cells, FFI): `+1.8%` (static standard), `+6.4%` (static
+     dictionary), `+2.7%` (flushed standard), and `+6.3%` (flushed dictionary).
+     Every cell in the 48-cell quality summary table is `>= -0.1%` (47 of 48
+     positive).
+   - On `mac` (Apple M5 Max `arm64`, 144 cells): FFI is **`+8.7%` / `+5.8%` /
+     `+7.4%` / `+6.7%` vs C** (`+9.8%` to `+22.3%` faster than baseline), and
+     Direct API reaches **`+11.8%` / `+8.2%` / `+11.2%` / `+10.2%` vs C**
+     (48/48 cells `+4.9%` to `+15.3%` faster than C).
+2. **Direct Rust API (`BrotliState::new` + `BrotliDecompressStream`) eliminates
+   FFI wrapper overhead:**
+   - Calling the Rust decoder directly instead of going through
+     `BrotliDecoderDecompressStream` (which boxes a `BrotliDecoderState` with
+     custom C allocator callbacks and `catch_unwind`) cuts 1-byte per-stream
+     fixed cost by **33–52%** (`0.44 -> 0.29 us` on `linux`, `0.42 -> 0.21 us`
+     on `mac`, `4.23 -> 3.08 us` on Android Cortex-A53), beating C on `linux`
+     and `mac`.
+   - Full streaming throughput improves by `+0.2%..+0.4%` on `linux`,
+     **`+2.5%..+2.8%`** on `mac`, and **`+2.5%..+7.9%`** on Android Cortex-A53.
+3. **Optimization gains hold across generic x86-64 + ThinLTO and 32-bit
+   in-order ARMv7 (Cortex-A53):**
+   - Under generic `x86-64` (no `-march=native` / `-C target-cpu=native`) +
+     ThinLTO, `perf` (`081c5d9`) improves over baseline (`2ed02ed`) by **`+7.1%`
+     to `+17.0%`** (same relative gain as native + fat LTO), beating C on
+     dictionary decode (`+4.6%` static, `+0.4%` flushed Direct) and narrowing
+     standard decode from `-10.5% / -12.5%` to `-3.9% / -4.6%`.
+   - On the 32-bit Android userspace (`armeabi-v7a`) running on an in-order
+     Cortex-A53 (`moto g play - 2023`), `perf` (`081c5d9`) + Direct API improves
+     over baseline FFI by **`+13.9%` (static standard), `+22.6%` (static
+     dictionary), `+20.2%` (flushed standard), and `+28.3%` (flushed
+     dictionary)**. The remaining gap on 32-bit ARMv7 comes from using a 64-bit
+     bit-reader accumulator (`reg_t = u64`) on a 32-bit register file (switching
+     to `reg_t = u32` was tested and regressed by 1.5–3.9% because refilling 16
+     bits at a time via byte loads is slower than refilling 32–48 bits via
+     `from_le_bytes`) and safe Rust's mandatory zero-initialization (`calloc`) of
+     the ringbuffer slice.

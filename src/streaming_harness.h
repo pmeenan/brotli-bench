@@ -27,6 +27,30 @@
 extern "C" void BrotliEncoderSetCustomDictionary(BrotliEncoderState* state,
                                                  size_t size,
                                                  const uint8_t* dict);
+
+// Direct Rust decoder API bindings (`rust/lib.rs`) using
+// `BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>` and
+// `BrotliDecompressStream` without the C FFI's `SubclassableAllocator` or
+// `catch_unwind` layer.
+extern "C" {
+BrotliDecoderState* RustDirect_BrotliDecoderCreateInstance(
+    brotli_alloc_func alloc_func, brotli_free_func free_func, void* opaque);
+BROTLI_BOOL RustDirect_BrotliDecoderSetParameter(
+    BrotliDecoderState* state, BrotliDecoderParameter param, uint32_t value);
+BROTLI_BOOL RustDirect_BrotliDecoderAttachDictionary(
+    BrotliDecoderState* state, BrotliSharedDictionaryType type, size_t size,
+    const uint8_t* data);
+BrotliDecoderResult RustDirect_BrotliDecoderDecompressStream(
+    BrotliDecoderState* state, size_t* available_in, const uint8_t** next_in,
+    size_t* available_out, uint8_t** next_out, size_t* total_out);
+BROTLI_BOOL RustDirect_BrotliDecoderHasMoreOutput(
+    const BrotliDecoderState* state);
+BROTLI_BOOL RustDirect_BrotliDecoderIsFinished(
+    const BrotliDecoderState* state);
+BrotliDecoderErrorCode RustDirect_BrotliDecoderGetErrorCode(
+    const BrotliDecoderState* state);
+void RustDirect_BrotliDecoderDestroyInstance(BrotliDecoderState* state);
+}  // extern "C"
 #endif
 
 namespace brotli_bench {
@@ -140,6 +164,50 @@ struct StandardBrotliApi {
   }
   static uint32_t DecoderVersion() { return ::BrotliDecoderVersion(); }
 };
+
+#if defined(BROTLI_BENCH_STANDARD_API_IS_RUST)
+// Uses `StandardBrotliApi` for encoding and the direct Rust
+// `BrotliState<StandardAlloc, ...>` + `BrotliDecompressStream` bindings for
+// decoding.
+struct RustDirectBrotliApi : StandardBrotliApi {
+  static BrotliDecoderState* DecoderCreateInstance(
+      brotli_alloc_func alloc_func, brotli_free_func free_func, void* opaque) {
+    return ::RustDirect_BrotliDecoderCreateInstance(alloc_func, free_func,
+                                                    opaque);
+  }
+  static BROTLI_BOOL DecoderSetParameter(
+      BrotliDecoderState* state, BrotliDecoderParameter param, uint32_t value) {
+    return ::RustDirect_BrotliDecoderSetParameter(state, param, value);
+  }
+  static BROTLI_BOOL DecoderAttachDictionary(BrotliDecoderState* state,
+                                             BrotliSharedDictionaryType type,
+                                             size_t size,
+                                             const uint8_t* data) {
+    return ::RustDirect_BrotliDecoderAttachDictionary(state, type, size, data);
+  }
+  static BrotliDecoderResult DecoderDecompressStream(
+      BrotliDecoderState* state, size_t* available_in, const uint8_t** next_in,
+      size_t* available_out, uint8_t** next_out, size_t* total_out) {
+    return ::RustDirect_BrotliDecoderDecompressStream(
+        state, available_in, next_in, available_out, next_out, total_out);
+  }
+  static BROTLI_BOOL DecoderHasMoreOutput(const BrotliDecoderState* state) {
+    return ::RustDirect_BrotliDecoderHasMoreOutput(state);
+  }
+  static BROTLI_BOOL DecoderIsFinished(const BrotliDecoderState* state) {
+    return ::RustDirect_BrotliDecoderIsFinished(state);
+  }
+  static BrotliDecoderErrorCode DecoderGetErrorCode(
+      const BrotliDecoderState* state) {
+    return ::RustDirect_BrotliDecoderGetErrorCode(state);
+  }
+  static void DecoderDestroyInstance(BrotliDecoderState* state) {
+    ::RustDirect_BrotliDecoderDestroyInstance(state);
+  }
+};
+#else
+using RustDirectBrotliApi = StandardBrotliApi;
+#endif
 
 // Non-owning view of a raw (prefix) dictionary, as used by Compression
 // Dictionary Transport (`dcb`). Empty means "no dictionary".

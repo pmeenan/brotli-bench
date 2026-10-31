@@ -222,28 +222,59 @@ Reading:
      `EnsureCompoundDictionaryInitialized` for single-chunk dictionaries.
    - Dictionary decode geomean improved from -8.5% (static) / -9.8% (flushed)
      vs C to +6.4% (static) / +6.3% (flushed) vs C on `linux`.
-7. **Build configuration realism (open).**
-   - The baseline uses `-C target-cpu=native` and fat LTO. Chromium ships
-     generic x86-64 (and arm64) builds with its own Rust flags.
-   - Add a measurement with Chromium-like flags: no `target-cpu=native`,
-     Chromium's opt-level and LTO settings. Keep the comparison like-for-like
-     by building C with matching flags.
-   - Wins must hold under those flags.
-8. **Integration path check (open).** Confirm which API Chrome will call: the
-   C FFI (what the harness measures) or the Rust API directly. Measure that
-   path too, if it differs. The FFI wrapper itself is about 2% in profiles.
+7. **Build configuration realism — DONE.**
+   - Added `-DBROTLI_BENCH_C_ARCH_FLAGS=""` to `CMakeLists.txt` so C and Rust can
+     be built with Chromium-like generic x86-64 flags (`-DBROTLI_BENCH_C_ARCH_FLAGS=""
+     -DBROTLI_BENCH_RUSTFLAGS="" -DBROTLI_BENCH_RUST_LTO=thin`).
+   - On `linux` (i9-11900KF @ 3.5 GHz, 144-cell default subset), the `perf`
+     (`081c5d9`) speedup over baseline (`2ed02ed`) holds under generic x86-64 +
+     ThinLTO: `+7.1%` static standard (`-10.5% -> -4.2% vs C`), `+17.0%` static
+     dictionary (`-10.2% -> +4.6% vs C`), `+9.5%` flushed standard
+     (`-12.5% -> -4.9% vs C`), `+15.6%` flushed dictionary (`-13.9% -> -0.3% vs C`).
+   - Also tested replacing `BitMask(n)`'s shift expression with a `kBitMask`
+     lookup on non-BMI2 `x86_64`; it was within noise (`+0.6%` static standard,
+     `-0.6%` flushed dictionary) and was reverted.
+8. **Integration path check (C FFI vs direct Rust API) — DONE.**
+   - Added `RustDirectBrotliApi` (`rust/lib.rs`, `src/streaming_harness.h`) and
+     `--rust-api <ffi|direct>` (`brotli_compare`, `bench_rust`) to benchmark both
+     the C FFI (`BrotliDecoderDecompressStream`, which boxes a `BrotliDecoderState`
+     containing custom allocator function pointers and C-callable wrapper fns)
+     and a thin wrapper around the direct Rust API
+     (`BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>` +
+     `BrotliDecompressStream`).
+   - **1-byte fixed per-stream decode cost:**
+     - `linux` (i9-11900KF @ 3.5 GHz): C `0.33 us` (`0.40 us` w/ 64 KB dict),
+       Rust FFI `0.44 us` (`0.46 us`), **Rust Direct `0.29 us` (`0.31 us`) —
+       13–31% faster than C and 33–34% lower latency than FFI**.
+     - `mac` (Apple M5 Max): C `0.21 us` (`0.21 us`), Rust FFI `0.42 us`
+       (`0.25 us`), **Rust Direct `0.21 us` (`0.12 us`) — matches or beats C and
+       is 2x faster than FFI**.
+     - Android (Cortex-A53 @ 2.30 GHz, 32-bit `armv7l`): C `2.15 us`
+       (`2.46 us`), Rust FFI `4.23 us` (`4.31 us`), **Rust Direct `3.08 us`
+       (`3.15 us`) — 27% lower latency than FFI**.
+   - **Full streaming decode throughput (Direct vs FFI, 144-cell default subset):**
+     - `linux` (native + fat LTO): Direct is `+0.2%` to `+0.4%` faster than FFI
+       (`+2.6%` static standard, `+9.8%` static dictionary, `+4.2%` flushed
+       standard, `+7.8%` flushed dictionary vs C).
+     - `mac` (Apple M5 Max `arm64`): Direct is **`+2.5%` to `+2.8%` faster than
+       FFI**, reaching **`+11.8%` static standard, `+8.2%` static dictionary,
+       `+11.2%` flushed standard, and `+10.2%` flushed dictionary vs C** (with
+       FFI already at `+8.7% / +5.8% / +7.4% / +6.7% vs C`).
+     - Android (Cortex-A53 32-bit `armv7l`): Direct is **`+2.5%` to `+7.9%`
+       faster than FFI** (`-20.9%` vs `-24.1%` static standard, `-12.0%` vs
+       `-16.7%` static dictionary, `-20.2%` vs `-23.5%` flushed standard,
+       `-14.2%` vs `-19.7%` flushed dictionary vs C; overall `+9.1%` to `+18.9%`
+       faster than baseline `2ed02ed`). Also tested `reg_t = u32` on 32-bit
+       `armv7`, which regressed by 1.5–3.9% because refilling a 32-bit bit
+       window every 16 bits via byte loads is slower than refilling 32–48 bits
+       at once in a 64-bit bit window via `from_le_bytes`; reverted.
 
 ## Deliverables and upstreaming
 
 - Small, self-contained commits on `rust-brotli-decompressor:perf`, each
-  with before/after numbers in the message.
+  with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.
 - Add a new dated measurement section to baseline.md when the decoder reaches
   parity. Never rewrite the 2026-10-29 baseline.
-
-## Open questions
-
-- Which flags and API Chrome will actually use (workstreams 7 and 8). Ask
-  before optimizing for `target-cpu=native`-specific codegen.

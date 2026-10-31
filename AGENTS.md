@@ -121,7 +121,11 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
   `*.rust.br` for every non-identical encode. `--quality` takes `N` or `A-B`.
   `--dictionary FILE` attaches a raw dictionary to every selected case.
   `--lgwin N` (10-24, default 22) sets the encoder window; `bench_c` /
-  `bench_rust` also take `--lgwin`.
+  `bench_rust` also take `--lgwin`. `--rust-api <ffi|direct>` (default `ffi`)
+  switches the Rust decoder between the C FFI (`BrotliDecoderDecompressStream`)
+  and a thin wrapper around the direct Rust API (`BrotliState::new` +
+  `BrotliDecompressStream`). `--decode-only` (`brotli_compare --bench`) skips
+  encode timing and decodes the C-encoded stream for both decoders.
 - `brotli_compare` exits non-zero if any verify check or any bench
   encode/decode fails. Bench checks every timed run (`ok`, deterministic
   encoded size, decoded size) and fully verifies decode output once per cell.
@@ -484,6 +488,63 @@ numbers with the exact command, machine, and commit SHAs.
     integration tests), all 4 fuzz targets pass, zero added `unsafe`. Pushed
     `perf` (`081c5d9`) to `pmeenan/rust-brotli-decompressor` and updated
     submodule pointer.
+- **2026-10-30** - Workstreams 7 & 8 (Chromium-like build flags, C FFI vs
+  direct Rust API) and multi-platform benchmarks across `linux` (Intel Core
+  i9-11900KF @ 3.5 GHz), `mac` (Apple M5 Max `arm64`, via `ssh mac` from
+  `linux` with `caffeinate -i -s`), and Android (`moto g play - 2023`, MediaTek
+  MT6765H 8x ARM Cortex-A53 @ 2.30 GHz `cpu2`, 32-bit `armv7l` userspace, via
+  `adb` on `linux`).
+  - **Harness additions:** added `-DBROTLI_BENCH_C_ARCH_FLAGS` to
+    `CMakeLists.txt` (default `"-march=native"`), `RustDirectBrotliApi` in
+    `rust/lib.rs` + `src/streaming_harness.h` wrapping
+    `BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>` +
+    `BrotliDecompressStream` directly, `--rust-api <ffi|direct>` in
+    `brotli_compare` and `bench_rust`, and `--decode-only` in
+    `brotli_compare --bench`.
+  - **1-byte fixed per-stream decode cost (`q6 static`):**
+    - `linux` (50k iters): C `0.33 us` (`0.40 us` w/ 64 KB dict), Rust FFI
+      `0.44 us` (`0.46 us`), **Rust Direct `0.29 us` (`0.31 us`) — 12–23%
+      faster than C and 33–34% lower latency than FFI**.
+    - `mac` M5 Max (50k iters): C `0.21 us` (`0.21 us`), Rust FFI `0.42 us`
+      (`0.25 us`), **Rust Direct `0.21 us` (`0.12 us`) — ties or beats C and is
+      2x faster than FFI**.
+    - Android Cortex-A53 (10k iters): C `2.15 us` (`2.46 us`), Rust FFI
+      `4.23 us` (`4.31 us`), **Rust Direct `3.08 us` (`3.15 us`) — 27% lower
+      latency than FFI**.
+  - **144-cell decode benchmark (`kDefaultBenchCases`, `q0..11`, `static` +
+    `flushed`, CSVs in `docs/baseline/bench-2026-10-30-*.csv`):**
+    - `linux` native + fat LTO (`081c5d9`): FFI `+2.3% / +9.5% / +4.1% / +7.5%`
+      vs C; Direct **`+2.6% / +9.8% / +4.2% / +7.8%` vs C** (`+0.2%..+0.4%`
+      faster than FFI).
+    - `linux` generic `x86-64` + ThinLTO (`-DBROTLI_BENCH_C_ARCH_FLAGS=""
+      -DBROTLI_BENCH_RUSTFLAGS="" -DBROTLI_BENCH_RUST_LTO=thin`): `perf`
+      (`081c5d9`) improves over baseline (`2ed02ed`) by **`+7.1% / +17.0% /
+      +9.5% / +15.6%`** (FFI: `-4.2% / +4.6% / -4.9% / -0.3%` vs C; Direct:
+      `-3.9% / +4.2% / -4.6% / +0.4%` vs C).
+    - `mac` Apple M5 Max (`arm64`): Baseline (`2ed02ed`, FFI) was
+      `-0.3% / -6.9% / -6.5% / -11.9%` vs C; `perf` (`081c5d9`, FFI) is
+      **`+8.7% / +5.8% / +7.4% / +6.7%` vs C** (`+9.8%..+22.3%` vs baseline);
+      `perf` (`081c5d9`, Direct) is **`+11.8% / +8.2% / +11.2% / +10.2%` vs C**
+      (`+2.5%..+2.8%` faster than FFI; 48/48 cells `+4.9%..+15.3%` faster than
+      C).
+    - Android Cortex-A53 (`armv7l` 32-bit): Baseline (`2ed02ed`, FFI) was
+      `-29.7% / -27.7% / -33.4% / -33.5%` vs C; `perf` (`081c5d9`, FFI) is
+      `-24.1% / -16.7% / -23.5% / -19.7%` vs C (**`+9.1% / +15.9% / +15.3% /
+      +18.9%` vs baseline**); `perf` (`081c5d9`, Direct) is
+      `-20.9% / -12.0% / -20.2% / -14.2%` vs C (**`+13.9% / +22.6% / +20.2% /
+      +28.3%` vs baseline FFI**).
+  - **What was tried and reverted:**
+    - `reg_t = u32` and `BROTLI_SHORT_FILL_BIT_WINDOW_READ = 2` on
+      `#[cfg(target_pointer_width = "32")]` in `bit_reader/mod.rs`: tested on
+      Android Cortex-A53 (`armv7l`), where it regressed decode throughput by
+      1.5–3.9% (`-24.8%` vs `-20.9%` static standard, `-15.0%` vs `-12.0%`
+      static dictionary) because refilling a 32-bit bit window every 16 bits
+      via byte loads (`BrotliLoad16LE`) and splitting `n_bits > 16` reads is
+      slower than refilling 32–48 bits at once in a 64-bit bit window via
+      `from_le_bytes`. Reverted.
+    - Table lookup `kBitMask[(n & 63) as usize]` in `BitMask(n)` on non-BMI2
+      `x86_64`: tested on `linux` generic `x86-64` + ThinLTO; within run-to-run
+      noise (`+0.6%` static standard, `-0.6%` flushed dictionary). Reverted.
 
 ## Maintaining documentation
 

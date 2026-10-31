@@ -73,6 +73,7 @@ enum class CaseSet { kAll, kStandard, kDictionary };
 struct CliOptions {
   bool run_verify = false;
   bool run_bench = false;
+  bool decode_only = false;
   std::vector<std::string> corpus_filters;
   CaseSet case_set = CaseSet::kAll;
   std::vector<StreamMode> modes = {StreamMode::kStatic, StreamMode::kFlushed};
@@ -85,6 +86,7 @@ struct CliOptions {
   int min_iters = 3;
   int max_iters = 100000;
   int lgwin = BROTLI_DEFAULT_WINDOW;
+  std::string rust_api = "ffi";
   std::string verify_csv_path;
   std::string bench_csv_path;
   std::string dump_dir;
@@ -96,6 +98,7 @@ void PrintHelp(const char* prog) {
       << "Options:\n"
       << "  --verify                 Bitstream parity + 4-way cross-decode (default)\n"
       << "  --bench                  Side-by-side C vs Rust encode & decode benchmark\n"
+      << "  --decode-only            Bench: skip encode timing (only C-encode once per cell)\n"
       << "  --corpus <a,b,...>       Case names (exact, else substring) or file paths\n"
       << "  --set <all|standard|dictionary>  Case set to load (default: all)\n"
       << "  --mode <all|static|flushed>      Streaming mode (default: all)\n"
@@ -104,6 +107,7 @@ void PrintHelp(const char* prog) {
       << "  --flushed-chunk <bytes>  Input chunk size for flushed mode (default: 4096)\n"
       << "  --static-chunk <bytes>   Network read size for static mode (default: 16384)\n"
       << "  --lgwin <10..24>         Encoder window bits (default: 22)\n"
+      << "  --rust-api <ffi|direct>  Rust decoder API: C FFI or direct Rust API (default: ffi)\n"
       << "  --min-time-ms <ms>       Bench: min timed duration per impl/cell (default: 300)\n"
       << "  --min-iters <n>          Bench: min timed iterations per impl/cell (default: 3)\n"
       << "  --max-iters <n>          Bench: max timed iterations per impl/cell (default: 100000)\n"
@@ -134,6 +138,8 @@ bool ParseCli(int argc, char** argv, CliOptions* opts) {
       opts->run_verify = true;
     } else if (arg == "--bench") {
       opts->run_bench = true;
+    } else if (arg == "--decode-only") {
+      opts->decode_only = true;
     } else if (arg == "--corpus" && value(&v)) {
       for (const std::string& f : SplitString(v, ',')) {
         if (f.empty()) return bad(v);
@@ -173,6 +179,9 @@ bool ParseCli(int argc, char** argv, CliOptions* opts) {
         return bad(v);
       }
       opts->lgwin = static_cast<int>(n);
+    } else if (arg == "--rust-api" && value(&v)) {
+      if (v != "ffi" && v != "direct") return bad(v);
+      opts->rust_api = v;
     } else if (arg == "--static-chunk" && value(&v)) {
       if (!ParseInt64(v, 1, int64_t{1} << 30, &n)) return bad(v);
       opts->static_chunk_size = static_cast<size_t>(n);
@@ -429,11 +438,17 @@ bool RunVerifySuite(const CliOptions& opts) {
         dopt.capture_output = true;
         dopt.dictionary = tc.dict();
         dopt.expected_output_size = tc.input.size();
+        auto rust_decode = [&](const EncodeResult& art,
+                               const DecodeOptions& o) {
+          return opts.rust_api == "direct"
+                     ? DecodeStream<RustDirectBrotliApi>(config, art, o)
+                     : DecodeStream<RustApi>(config, art, o);
+        };
         const DecodeResult decs[4] = {
             DecodeStream<CApi>(config, c_enc, dopt),
-            DecodeStream<RustApi>(config, c_enc, dopt),
+            rust_decode(c_enc, dopt),
             DecodeStream<CApi>(config, r_enc, dopt),
-            DecodeStream<RustApi>(config, r_enc, dopt),
+            rust_decode(r_enc, dopt),
         };
         const char* const dec_names[4] = {"CC", "CR", "RC", "RR"};
         bool dec_ok[4];
@@ -452,7 +467,7 @@ bool RunVerifySuite(const CliOptions& opts) {
           DecodeOptions nd = dopt;
           nd.dictionary = Dictionary{};
           const DecodeResult c_nd = DecodeStream<CApi>(config, c_enc, nd);
-          const DecodeResult r_nd = DecodeStream<RustApi>(config, c_enc, nd);
+          const DecodeResult r_nd = rust_decode(c_enc, nd);
           const bool agree =
               c_nd.ok == r_nd.ok &&
               (!c_nd.ok || c_nd.decoded_bytes == r_nd.decoded_bytes);
@@ -597,8 +612,9 @@ bool RunBenchSuite(const CliOptions& opts) {
   }
 
   bool all_ok = true;
-  std::printf("\n%s\n BROTLI SIDE-BY-SIDE BENCHMARK (C reference vs Rust FFI)\n",
-              kRule);
+  std::printf(
+      "\n%s\n BROTLI SIDE-BY-SIDE BENCHMARK (C reference vs Rust %s)\n", kRule,
+      opts.rust_api == "direct" ? "direct API" : "FFI");
   std::printf(" lgwin %d | Flushed chunk: %zu B | Static read chunk: %zu B | Decode output "
               "buffer: %zu B | min %.0f ms & %d iters per impl/cell\n",
               opts.lgwin, opts.flushed_chunk_size, opts.static_chunk_size,
@@ -629,8 +645,11 @@ bool RunBenchSuite(const CliOptions& opts) {
         // 1. Untimed reference artifacts.
         const EncodeResult c_art = EncodeStream<CApi>(
             config, tc.input.data(), tc.input.size(), params);
-        const EncodeResult r_art = EncodeStream<RustApi>(
-            config, tc.input.data(), tc.input.size(), params);
+        const EncodeResult r_art =
+            opts.decode_only
+                ? c_art
+                : EncodeStream<RustApi>(
+                      config, tc.input.data(), tc.input.size(), params);
         if (!c_art.ok || !r_art.ok) {
           fail_row("encode error: C='" + c_art.error_message + "' Rust='" +
                    r_art.error_message + "'");
@@ -643,27 +662,32 @@ bool RunBenchSuite(const CliOptions& opts) {
         // reference artifact size (encoders are deterministic).
         TimedSamples c_enc;
         TimedSamples r_enc;
-        std::string enc_err;
-        auto encode_runner = [&](auto api_tag, const EncodeResult& ref) {
-          using Api = decltype(api_tag);
-          return [&, ref_size = ref.compressed_bytes.size()](TimedSamples* out) {
-            EncodeResult e = EncodeStream<Api>(config, tc.input.data(),
-                                               tc.input.size(), params);
-            if (!e.ok || e.compressed_bytes.size() != ref_size) {
-              enc_err = e.ok ? "non-deterministic encoder output size"
-                             : e.error_message;
-              return false;
-            }
-            out->ns.push_back(static_cast<double>(e.elapsed_ns));
-            out->total_ns += static_cast<double>(e.elapsed_ns);
-            return true;
+        if (opts.decode_only) {
+          c_enc.ns.push_back(static_cast<double>(c_art.elapsed_ns));
+          r_enc.ns.push_back(static_cast<double>(c_art.elapsed_ns));
+        } else {
+          std::string enc_err;
+          auto encode_runner = [&](auto api_tag, const EncodeResult& ref) {
+            using Api = decltype(api_tag);
+            return [&, ref_size = ref.compressed_bytes.size()](TimedSamples* out) {
+              EncodeResult e = EncodeStream<Api>(config, tc.input.data(),
+                                                 tc.input.size(), params);
+              if (!e.ok || e.compressed_bytes.size() != ref_size) {
+                enc_err = e.ok ? "non-deterministic encoder output size"
+                               : e.error_message;
+                return false;
+              }
+              out->ns.push_back(static_cast<double>(e.elapsed_ns));
+              out->total_ns += static_cast<double>(e.elapsed_ns);
+              return true;
+            };
           };
-        };
-        if (!TimeInterleaved(opts, encode_runner(CApi{}, c_art),
-                             encode_runner(RustApi{}, r_art), &c_enc,
-                             &r_enc)) {
-          fail_row("timed encode: " + enc_err);
-          continue;
+          if (!TimeInterleaved(opts, encode_runner(CApi{}, c_art),
+                               encode_runner(RustApi{}, r_art), &c_enc,
+                               &r_enc)) {
+            fail_row("timed encode: " + enc_err);
+            continue;
+          }
         }
 
         // 3. Decode timing on the C-encoded artifact so both decoders do
@@ -672,10 +696,14 @@ bool RunBenchSuite(const CliOptions& opts) {
         check_opts.capture_output = true;
         check_opts.dictionary = tc.dict();
         check_opts.expected_output_size = tc.input.size();
+        auto rust_decode = [&](const DecodeOptions& o) {
+          return opts.rust_api == "direct"
+                     ? DecodeStream<RustDirectBrotliApi>(config, c_art, o)
+                     : DecodeStream<RustApi>(config, c_art, o);
+        };
         const DecodeResult c_check =
             DecodeStream<CApi>(config, c_art, check_opts);
-        const DecodeResult r_check =
-            DecodeStream<RustApi>(config, c_art, check_opts);
+        const DecodeResult r_check = rust_decode(check_opts);
         if (!c_check.ok || c_check.decoded_bytes != tc.input ||
             !r_check.ok || r_check.decoded_bytes != tc.input) {
           fail_row("decode verification: C='" +
@@ -693,22 +721,30 @@ bool RunBenchSuite(const CliOptions& opts) {
         TimedSamples c_dec;
         TimedSamples r_dec;
         std::string dec_err;
-        auto decode_runner = [&](auto api_tag) {
-          using Api = decltype(api_tag);
-          return [&](TimedSamples* out) {
-            DecodeResult d = DecodeStream<Api>(config, c_art, dopt);
-            if (!d.ok || d.total_decoded_size != tc.input.size()) {
-              dec_err = d.ok ? "decoded size mismatch" : d.error_message;
-              return false;
-            }
-            out->ns.push_back(static_cast<double>(d.elapsed_ns));
-            out->chunk_us.push_back(d.MeanChunkLatencyUs());
-            out->total_ns += static_cast<double>(d.elapsed_ns);
-            return true;
-          };
+        auto c_decode_runner = [&](TimedSamples* out) {
+          DecodeResult d = DecodeStream<CApi>(config, c_art, dopt);
+          if (!d.ok || d.total_decoded_size != tc.input.size()) {
+            dec_err = d.ok ? "decoded size mismatch" : d.error_message;
+            return false;
+          }
+          out->ns.push_back(static_cast<double>(d.elapsed_ns));
+          out->chunk_us.push_back(d.MeanChunkLatencyUs());
+          out->total_ns += static_cast<double>(d.elapsed_ns);
+          return true;
         };
-        if (!TimeInterleaved(opts, decode_runner(CApi{}),
-                             decode_runner(RustApi{}), &c_dec, &r_dec)) {
+        auto r_decode_runner = [&](TimedSamples* out) {
+          DecodeResult d = rust_decode(dopt);
+          if (!d.ok || d.total_decoded_size != tc.input.size()) {
+            dec_err = d.ok ? "decoded size mismatch" : d.error_message;
+            return false;
+          }
+          out->ns.push_back(static_cast<double>(d.elapsed_ns));
+          out->chunk_us.push_back(d.MeanChunkLatencyUs());
+          out->total_ns += static_cast<double>(d.elapsed_ns);
+          return true;
+        };
+        if (!TimeInterleaved(opts, c_decode_runner, r_decode_runner, &c_dec,
+                             &r_dec)) {
           fail_row("timed decode: " + dec_err);
           continue;
         }

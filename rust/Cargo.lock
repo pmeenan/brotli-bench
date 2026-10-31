@@ -30,6 +30,7 @@ dependencies = [
 name = "brotli-bench-ffi"
 version = "0.1.0"
 dependencies = [
+ "brotli-decompressor",
  "brotli-ffi",
 ]
 

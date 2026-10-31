@@ -10,7 +10,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(COMMON_OPT_FLAGS -O3 -march=native -g)
+set(BROTLI_BENCH_C_ARCH_FLAGS "-march=native" CACHE STRING
+  "Target-CPU flags for C/C++ builds (set empty for generic x86-64)")
+separate_arguments(BROTLI_BENCH_C_ARCH_FLAGS_LIST NATIVE_COMMAND
+  "${BROTLI_BENCH_C_ARCH_FLAGS}")
+set(COMMON_OPT_FLAGS -O3 ${BROTLI_BENCH_C_ARCH_FLAGS_LIST} -g)
 set(BROTLI_C_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/brotli-c/c/include")
 
 # Rust release-profile knobs (defaults live in `rust/Cargo.toml`).

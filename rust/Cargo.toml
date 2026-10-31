@@ -18,6 +18,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 brotli-ffi = { path = "../vendor/rust-brotli/c" }
+brotli-decompressor = { path = "../vendor/rust-brotli-decompressor" }
 
 # `brotli-ffi` depends on `brotli` (and transitively `brotli-decompressor`)
 # by crates.io version; redirect both to the submodule forks.
