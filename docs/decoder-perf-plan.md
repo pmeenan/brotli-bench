@@ -282,11 +282,52 @@ Reading:
        -19.6% / -15.1%` vs C (**`+12.1% / +17.2% / +21.4% / +28.9%` faster than
        baseline `2ed02ed` FFI**); Direct improved to `-19.6% / -12.2% / -16.7% /
        -10.0%` vs C (**`+15.1% / +20.8% / +26.4% / +35.2%` faster than baseline
-       `2ed02ed` FFI**). The remaining gap on 32-bit in-order ARMv7 is structural
+       `2ed02ed` FFI**). (Corrected 2026-10-31: the gap is mostly the 32-bit
+       bit-reader refill, fixable in safe Rust; see "ARMv7 gap" below. Original
+       claim follows.) The remaining gap on 32-bit in-order ARMv7 is structural
        to `#![forbid(unsafe_code)]`: slice bounds checks on every bit-reader
        refill (`input.get`) and Huffman subtable lookup (`table.get`) plus fat
        `(ptr, len)` slice references on a 15-register 32-bit file and mandatory
        `calloc` zero-initialization of the ringbuffer.
+
+## ARMv7 gap (2026-10-31)
+
+Measured on Android Cortex-A53, Thumb-2 + NEON on both sides
+([baseline.md](baseline.md#android-armv7-with-neon-2026-10-31)). Instruction
+samples were attributed to their call site in `ProcessCommandsInternal`
+through the `addr2line -i` inline chain:
+
+| Phase | Rust vs C instructions |
+|---|---:|
+| `ReadCommand` (symbol + extra bits) | +26% |
+| `ReadDistance` | +23% |
+| Trivial-context literal loop | -26% |
+| Ring buffer `memset` (zero-init; C mallocs) | ~3% of Rust time |
+
+**Root cause:** the 32-bit window refills every 16 bits.
+- C's refill is about 8 instructions: post-increment `ldrh [next_in], #2`,
+  shift, or; there's no separate `avail_in`.
+- Rust's is about 13-21: an `input.get(next_in..)` check against
+  `input.len()`, an `avail_in` load/sub/store, the input pointer and length
+  reloaded from the stack, and `s.br` field traffic.
+- `kCmdLut` and `dist_context_map` add 3-instruction bounds checks per
+  command.
+
+None of this needs `unsafe` to fix.
+
+Tried and reverted:
+1. A local `BrotliBitReader` copy in the fast literal loops. The loop became
+   register-resident, but there was no change (those loops aren't the gap).
+2. A per-call tail-slice reader (`BrotliFastBitReader`: the unread input as a
+   subslice, `len()` = `avail_in`) in `ReadCommand`, `ReadDistance` and the
+   literal loops. The refill matched C's about 8 instructions, but
+   constructing and storing the reader on every call made it +17%
+   instructions and -11% speed.
+
+**Next step:** a persistent tail-slice / pointer-model reader for the whole
+`ProcessCommands` call, synced to `BrotliState` only at exits and block
+switches. Watch for the x86 register-pressure regression seen when `br` was
+hoisted before.
 
 ## Deliverables and upstreaming
 

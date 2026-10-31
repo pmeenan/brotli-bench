@@ -57,6 +57,7 @@ with and without Compression Dictionary Transport raw dictionaries.
 | `docs/encoder-parity.md`, `docs/encoder-parity/` | Catalog of every Rust-vs-C encoder output divergence with root causes, a confirmed 8-patch fix series (`patches/`), and the dictionary-span repro. |
 | `scripts/summarize_bench.py` | Markdown summary of a `--bench-csv` file; `--baseline OLD.csv` for before/after, `--details` for per-case tables. |
 | `scripts/brstruct.py` | Diffable structural dump of a brotli stream (headers, block switches, context maps, commands) for finding the first C/Rust divergence. |
+| `scripts/test_armv7.sh` | Runs the decompressor's tests for 32-bit ARM under `qemu-arm` (musl target, `rust-lld`); the only test run that covers the 32-bit bit reader. Per-commit gate (see `docs/development.md`). |
 | `scripts/fetch_corpora.sh` | Re-downloads / regenerates corpora; checksums in `scripts/corpora.sha256` (outside `corpora/` so it isn't loaded as a corpus). |
 | `vendor/brotli-c` | Submodule: google/brotli (upstream, read-only reference). |
 | `vendor/rust-brotli` | Submodule: fork `pmeenan/rust-brotli` (`upstream` remote -> `dropbox/rust-brotli`). Encoder + C FFI crate in `c/`. |
@@ -634,6 +635,54 @@ numbers with the exact command, machine, and commit SHAs.
     passes (124 lib + integration tests), fuzz targets pass, zero added `unsafe`.
     Pushed `perf` (`05ee043`) to `pmeenan/rust-brotli-decompressor` and updated
     submodule pointer.
+- **2026-10-31** - Review of the decoder series `2ed02ed..05ee043`.
+  - No correctness/safety regressions. armv7 tests (musl target, `rust-lld`,
+    `qemu-arm` on `linux`) pass; Android full `--verify` (Thumb-2 + NEON)
+    600/600 parity, 440/600 exact.
+  - Test gap: the `cfg(not(any(target_pointer_width = "64", test)))` gates
+    mean lib unit tests never build the 32-bit reader on any host.
+  - Earlier Android numbers had **no NEON on either side**
+    (`armv7-unknown-linux-gnueabihf` disables `neon`; Debian gcc defaults to
+    `vfpv3-d16`). Chromium uses `thumbv7neon-linux-androideabi`. With
+    `thumbv7neon-unknown-linux-gnueabihf` + `-mthumb -mfpu=neon-fp-armv8`
+    the gap is unchanged: Direct -19.5% / -10.9% / -16.3% / -9.9% vs C.
+  - Root cause of the remaining ARMv7 gap (`simpleperf`, wiki q5 static):
+    +20% instructions at equal IPC, concentrated in `ReadCommand` (+26%)
+    and `ReadDistance` (+23%). The 32-bit refill (every 16 bits) costs
+    about 13-21 instructions in Rust (`input.get()` bounds check, `avail_in`
+    maintenance, stack reloads) vs about 8 in C (pointer post-increment).
+    Fixable in safe Rust; not structural to `forbid(unsafe_code)`.
+  - Tried and reverted: a local bit-reader copy in the fast literal loops
+    (no change); a per-call tail-slice reader in `ReadCommand` /
+    `ReadDistance` (refill matched C, but per-call setup made it +17%
+    instructions, -11% speed). Next step: a persistent tail-slice reader
+    across `ProcessCommands`.
+- **2026-10-31** - Review fixes in rust-brotli-decompressor `6082a30` (on
+  `perf`, pushed), with the submodule bumped:
+  - The lib unit tests now build the target's own register width.
+    - Removed `test` from the 32-bit `cfg` gates.
+    - The hard-coded 64-bit `bit_reader` vectors are 64-bit only.
+    - `regression_tests.rs` and the metadata tests are width-aware.
+  - Testing the 32-bit reader exposed `BitMask(32) == 0` on 32-bit targets.
+    It's now documented as n <= 31 there and `debug_assert!`ed; making
+    n == 32 work cost +1.4% instructions, and the 32-bit reader never needs
+    it.
+  - `debug_assert!`s on the unreachable fallbacks: `load_huffman_code`,
+    `BrotliLoad16LE`, the empty-tree views, and the forgotten tree groups.
+    `memcpy_within_slice` now returns false instead of skipping the copy.
+  - Compile-time ties between the tree view sizes and
+    `BrotliHuffmanMaxTableSize` (now a `const fn`).
+  - Restored upstream's `block_length[0] == 0` guards and the debug-only
+    `MemoryBlock` leak diagnostic.
+  - New gate `scripts/test_armv7.sh`, plus the Android NEON build config in
+    `docs/perf-host.md`.
+  - Gates:
+    - x86 `--verify` 600/600 (440 exact) and span repro 4/4;
+    - Android `--verify` 600/600 (440 exact);
+    - cargo test x86-64 + armv7 (qemu), debug + release;
+    - no added `unsafe`.
+  - Perf: Android 144-cell Rust Direct vs C -14.7% before, -14.6% / -14.7%
+    after (two back-to-back rounds, same nightly toolchain); no change.
 
 ## Maintaining documentation
 

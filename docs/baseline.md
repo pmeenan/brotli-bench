@@ -625,9 +625,39 @@ calling `BrotliDecoderDecompressStream` vs `--rust-api direct` calling
      Android Cortex-A53 (`armv7l`) total speedup over baseline (`2ed02ed`) to
      **`+12.1% / +17.2% / +21.4% / +28.9%` (FFI)** and **`+15.1% / +20.8% /
      +26.4% / +35.2%` (Direct)**.
+   - **Correction (2026-10-31):** these Android binaries had no NEON on
+     either side, and the gap is mostly the bit-reader representation, which
+     safe Rust can fix (see the 2026-10-31 section below). Original text:
    - The remaining `-10.0%` to `-19.6%` gap on 32-bit ARMv7 (Cortex-A53) is
      structural to `#![forbid(unsafe_code)]` on an in-order 32-bit pipeline:
      safe Rust must bounds-check every bit-reader refill (`input.get`) and
      Huffman subtable lookup (`table.get`) against slice `.len()`, carry fat
      `(ptr, len)` slice pairs in a 15-register 32-bit register file, and
      zero-initialize (`calloc`) the ringbuffer slice before forming a safe `&mut [u8]`.
+
+## Android ARMv7 with NEON (2026-10-31)
+
+The 2026-10-30 Android CSVs were built without NEON on either side (see
+[perf-host.md](perf-host.md)). This rerun of rust-brotli-decompressor
+`05ee043` uses Chromium's arm32 configuration on both sides: Thumb-2 + NEON.
+- C: `-O3 -mcpu=cortex-a53 -mfpu=neon-fp-armv8 -mthumb`.
+- Rust: `thumbv7neon-unknown-linux-gnueabihf`, `-C target-cpu=cortex-a53`,
+  fat LTO, `panic=abort`, stable 1.99.1.
+- Run: `moto g play - 2023` (Cortex-A53), `taskset 4` (`cpu2`, 2.3 GHz),
+  `brotli_compare --bench --decode-only --rust-api direct
+  --min-time-ms 400`.
+- CSV: `baseline/bench-2026-10-31-android-neon-direct.csv`.
+
+Rust Direct vs C decode (geomean, 6 default cases, q0-q11):
+
+| static standard | static dictionary | flushed standard | flushed dictionary |
+|---:|---:|---:|---:|
+| -19.5% | -10.9% | -16.3% | -9.9% |
+
+That's within noise of the no-NEON run (-19.6% / -12.2% / -16.7% / -10.0%),
+so NEON doesn't explain the gap. Copies do use NEON `vld1`/`vst1` now.
+
+`simpleperf stat`, `wiki-Brotli.html` q5 static, 1000 iterations: C
+3.08 G instructions / 3.33 G cycles; Rust 3.69 G (+20%) / 3.98 G, at the same
+IPC (about 0.92). The gap is instruction count. See
+[decoder-perf-plan.md](decoder-perf-plan.md#armv7-gap-2026-10-31) for where.
