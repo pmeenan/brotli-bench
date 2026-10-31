@@ -12,6 +12,7 @@ before you finish a task** (see
 | `AGENTS.md` (this file) | Always, first | Rules, known issues, log |
 | [`docs/development.md`](docs/development.md) | Before committing to a fork, bumping a submodule, or preparing a PR | Branch layout, per-commit gates, PR / rebase / tagging process, branch status |
 | [`docs/decoder-perf-plan.md`](docs/decoder-perf-plan.md) | Before any decoder work (current priority) | Decoder perf goal, profiles, method, prioritized workstreams |
+| [`docs/armv7-next-steps.md`](docs/armv7-next-steps.md) | Before working on 32-bit ARM decoder perf | Ranked ideas, WIP branch `persistent-br`, Android tooling |
 | [`docs/perf-host.md`](docs/perf-host.md) | Before any performance measurement on the `linux` box | Perf host specs, `hostlock` reservation protocol, measurement recipe |
 | [`docs/baseline.md`](docs/baseline.md) (+ `docs/baseline/`) | Before and after any perf measurement | Pre-optimization numbers, methodology, noise / drift |
 | [`docs/encoder-parity.md`](docs/encoder-parity.md) (+ `docs/encoder-parity/`) | Before touching encoder code; when output changes | Every Rust-vs-C output divergence, root causes, fix patches, repros |
@@ -57,6 +58,7 @@ with and without Compression Dictionary Transport raw dictionaries.
 | `docs/encoder-parity.md`, `docs/encoder-parity/` | Catalog of every Rust-vs-C encoder output divergence with root causes, a confirmed 8-patch fix series (`patches/`), and the dictionary-span repro. |
 | `scripts/summarize_bench.py` | Markdown summary of a `--bench-csv` file; `--baseline OLD.csv` for before/after, `--details` for per-case tables. |
 | `scripts/brstruct.py` | Diffable structural dump of a brotli stream (headers, block switches, context maps, commands) for finding the first C/Rust divergence. |
+| `scripts/android/` | Android (Cortex-A53, Thumb-2 + NEON) build / bench / profile-attribution helpers; see `docs/armv7-next-steps.md`. Dev-VM paths (`~/src/brotli-bench`, `ssh linux`, adb). |
 | `scripts/test_armv7.sh` | Runs the decompressor's tests for 32-bit ARM under `qemu-arm` (musl target, `rust-lld`); the only test run that covers the 32-bit bit reader. Per-commit gate (see `docs/development.md`). |
 | `scripts/fetch_corpora.sh` | Re-downloads / regenerates corpora; checksums in `scripts/corpora.sha256` (outside `corpora/` so it isn't loaded as a corpus). |
 | `vendor/brotli-c` | Submodule: google/brotli (upstream, read-only reference). |
