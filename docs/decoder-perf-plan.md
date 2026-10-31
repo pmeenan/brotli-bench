@@ -324,16 +324,32 @@ Tried and reverted:
    constructing and storing the reader on every call made it +17%
    instructions and -11% speed.
 
-**Next step:** a persistent tail-slice / pointer-model reader for the whole
-`ProcessCommands` call, synced to `BrotliState` only at exits and block
-switches. Watch for the x86 register-pressure regression seen when `br` was
-hoisted before.
+**Landed (`45d09e0`):** a persistent `BrotliFastBitReader` across the non-safe
+path of `ProcessCommandsInternal` (without the redundant empty-slice store on
+underflow in `fill`, and with `self.fill(16)` hoisted in `read_bits`), plus
+`load_cmd_lut -> &'static CmdLutElement`, cached `[u8; 4]` `dist_context_map`,
+hoisted counter updates out of the fast literal loops, simplified
+`Option<[&LiteralTree; 64]>` `context_trees`, and a hoisted `memmove16` bounds
+check.
+- Cuts **206.9M instructions (-29.7% of excess over C)** on `wiki-Brotli.html`
+  q5 static (`3,780.3M -> 3,573.3M`, `+8.8%` median throughput) and **192.8M
+  instructions (-44.6% of excess over C)** on `jquery-3.7.1.min.js` q5 static
+  (`2,818.9M -> 2,626.1M`, `+8.6%` median throughput) on Cortex-A53.
+- Improves the 144-cell Android Cortex-A53 benchmark by **+6.7% / +7.9% /
+  +4.0% / +3.9%** (+5.5% overall across all 144 cells), narrowing the Rust
+  Direct vs C gap from `-14.7%` to **`-10.3%`** (`-13.0% / -5.3% / -12.0% /
+  -6.1%`).
+- Also speeds up Apple M5 Max (`arm64`) by another **+6.3% / +7.3% / +3.7% /
+  +3.8% (Direct)** and **+8.2% / +9.8% / +5.8% / +5.5% (FFI)** to **`+18.3% /
+  +15.9% / +14.3% / +14.3%` (Direct)** and **`+18.4% / +15.2% / +14.0% / +12.7%`
+  (FFI)** vs C, while keeping `linux` i9-11900KF ahead of C (`+3.6% / +8.9% /
+  +5.0% / +7.5%` Direct, `+3.9% / +10.5% / +4.8% / +8.4%` FFI).
 
 ## Deliverables and upstreaming
 
 - Small, self-contained commits on `rust-brotli-decompressor:perf`, each
   with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`,
-  `fd8b2e8`, `05ee043`).
+  `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.

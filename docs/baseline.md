@@ -661,3 +661,34 @@ so NEON doesn't explain the gap. Copies do use NEON `vld1`/`vst1` now.
 3.08 G instructions / 3.33 G cycles; Rust 3.69 G (+20%) / 3.98 G, at the same
 IPC (about 0.92). The gap is instruction count. See
 [decoder-perf-plan.md](decoder-perf-plan.md#armv7-gap-2026-10-31) for where.
+
+## Persistent `BrotliFastBitReader` & ARMv7 hot-loop optimizations: `45d09e0` (2026-10-31)
+
+Measured after `vendor/rust-brotli-decompressor:perf` commit `45d09e0`
+(persistent `BrotliFastBitReader` across `ProcessCommandsInternal`, branchless
+`fill` without empty-slice store on underflow, hoisted `fill(16)` in
+`read_bits`, `load_cmd_lut -> &'static CmdLutElement`, cached `[u8; 4]`
+`dist_context_map`, hoisted counter updates out of the fast literal loops,
+simplified `Option<[&LiteralTree; 64]>` `context_trees`, and hoisted
+`memmove16` bounds check) on the 144-cell default benchmark subset across all
+three platforms:
+
+| Artifact | Platform & Config |
+| --- | --- |
+| [baseline/bench-2026-10-31-android-neon-direct-pbr5.csv](baseline/bench-2026-10-31-android-neon-direct-pbr5.csv) | Android (Cortex-A53 @ 2.30 GHz `cpu2`, Thumb-2 + NEON), `perf` (`45d09e0`), Direct Rust API |
+| [baseline/bench-2026-10-31-linux-native-direct-pbr5.csv](baseline/bench-2026-10-31-linux-native-direct-pbr5.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`45d09e0`), Direct Rust API |
+| [baseline/bench-2026-10-31-linux-native-ffi-pbr5.csv](baseline/bench-2026-10-31-linux-native-ffi-pbr5.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`45d09e0`), C FFI |
+| [baseline/bench-2026-10-31-mac-m5max-direct-pbr5.csv](baseline/bench-2026-10-31-mac-m5max-direct-pbr5.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`45d09e0`), Direct Rust API |
+| [baseline/bench-2026-10-31-mac-m5max-ffi-pbr5.csv](baseline/bench-2026-10-31-mac-m5max-ffi-pbr5.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`45d09e0`), C FFI |
+
+| Platform & Config (144 cells, `45d09e0`) | `static standard` vs C (vs `05ee043`/`6082a30`) | `static dictionary` vs C (vs `05ee043`/`6082a30`) | `flushed standard` vs C (vs `05ee043`/`6082a30`) | `flushed dictionary` vs C (vs `05ee043`/`6082a30`) |
+| --- | --- | --- | --- | --- |
+| **Android Cortex-A53 (`thumbv7neon`, Direct)** | **-13.0%** (**+6.7%**) | **-5.3%** (**+7.9%**) | **-12.0%** (**+4.0%**) | **-6.1%** (**+3.9%**) |
+| **`mac` Apple M5 Max (`arm64`, Direct)** | **+18.3%** (**+6.3%**) | **+15.9%** (**+7.3%**) | **+14.3%** (**+3.7%**) | **+14.3%** (**+3.8%**) |
+| **`mac` Apple M5 Max (`arm64`, FFI)** | **+18.4%** (**+8.2%**) | **+15.2%** (**+9.8%**) | **+14.0%** (**+5.8%**) | **+12.7%** (**+5.5%**) |
+| **`linux` i9-11900KF (native + fat LTO, Direct)** | **+3.6%** (+0.1%) | **+8.9%** (-0.4%) | **+5.0%** (-0.7%) | **+7.5%** (-0.5%) |
+| **`linux` i9-11900KF (native + fat LTO, FFI)** | **+3.9%** (+0.5%) | **+10.5%** (-1.3%) | **+4.8%** (+0.3%) | **+8.4%** (-0.9%) |
+
+`simpleperf stat` on Android Cortex-A53 (1000 iterations, `q5 static`, stable `rustc 1.99.1`):
+- `wiki-Brotli.html`: C `3,082.8M` instructions / `3,297.8M` cycles (`160.5 MiB/s`); Rust `6082a30` `3,780.3M` / `4,004.4M` (`125.4 MiB/s`); **Rust `45d09e0` `3,573.3M` instructions (-206.9M, -29.7% of excess over C) / `3,783.9M` cycles (`136.4 MiB/s`, +8.8%)**.
+- `jquery-3.7.1.min.js`: C `2,386.2M` instructions / `2,388.6M` cycles (`82.4 MiB/s`); Rust `6082a30` `2,818.9M` / `2,866.7M` (`68.4 MiB/s`); **Rust `45d09e0` `2,626.1M` instructions (-192.8M, -44.6% of excess over C) / `2,639.3M` cycles (`74.3 MiB/s`, +8.6%)**.

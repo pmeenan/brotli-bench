@@ -685,6 +685,89 @@ numbers with the exact command, machine, and commit SHAs.
     - no added `unsafe`.
   - Perf: Android 144-cell Rust Direct vs C -14.7% before, -14.6% / -14.7%
     after (two back-to-back rounds, same nightly toolchain); no change.
+- **2026-10-31** - Persistent `BrotliFastBitReader` and ARMv7 hot-loop
+  optimizations (`vendor/rust-brotli-decompressor:perf`, commit `45d09e0`):
+  - **Changes landed (`45d09e0`):**
+    1. Added `BrotliFastBitReader<'a>` in `src/bit_reader/mod.rs` (`val_`,
+       `bit_pos_`, `tail: &'a [u8]`, `start_len`), persisted across the non-safe
+       path of `ProcessCommandsInternal` (`ReadSymbol`, `ReadCommandInternal`,
+       `ReadDistanceInternal`, fast literal loops, and non-safe block switches)
+       and synced back to `s.br` only before safe-path calls, around block
+       switches, and on exit.
+    2. Omitted the redundant `else { self.tail = &[]; }` store on underflow in
+       `BrotliFastBitReader::fill` (both 64-bit and 32-bit). That store had
+       forced LLVM to write `0` to `self.tail.len` and branch around every
+       refill; without it, 32-bit 16-bit refills compile to a branchless Thumb-2
+       `ittt cs; ldrhcs; orrcs; subcs` sequence and keep `tail.ptr` and
+       `tail.len` register-resident across `ReadCommandInternal` and the literal
+       loops.
+    3. Hoisted `self.fill(16)` before `if n_bits <= 16` in
+       `BrotliFastBitReader::read_bits` and simplified the 32-bit `n_bits > 16`
+       second refill (`self.bit_pos_ < 16` is guaranteed after the first
+       `fill(16)`).
+    4. Added `load_cmd_lut(index: usize) -> &'static prefix::CmdLutElement`
+       (`None => &prefix::kCmdLut[0]`), compiling to a branchless `cmp r0, #704;
+       it cs; movcs r0, #0`, and pre-loaded `v.insert_len_offset` and
+       `v.copy_len_offset` before `br.read_bits`. Returning `CmdLutElement` by
+       value (`pbr3`) caused SROA to split `v` into 6 scalar `phi` registers
+       across `br.read_bits`, spilling 3 registers (`sl`, `r9`, `ip`); returning
+       `&'static CmdLutElement` (`pbr5`) saved another 108.4M instructions on
+       `wiki-Brotli.html` q5 static and 84.8M on `jquery-3.7.1.min.js`.
+    5. Added `load_dist_context_map -> [u8; 4]` cached in
+       `ProcessCommandsInternal` and updated on `DecodeDistanceBlockSwitch`,
+       eliminating 3 struct loads and a slice bounds check per command.
+    6. Hoisted `pos += fast_steps as i32; s.block_type_length_state.block_length[0]
+       -= fast_steps as u32; i -= fast_steps as i32;` out of both fast literal
+       loops so the inner loops carry no live-out counters, and simplified
+       `context_trees` from `Option<([&LiteralTree; 64], usize)>` to
+       `Option<[&LiteralTree; 64]>` invalidated on `DecodeLiteralBlockSwitch`.
+    7. Hoisted the shared `len < 16 || max(off_dst, off_src) > len - 16` check
+       in `memmove16` above the 64-bit / 32-bit `cfg` split, cutting the 32-bit
+       `memmove16` bounds check from 10 instructions (4 branches) to 6
+       instructions (1 branch).
+    8. Added `fast_bit_reader_matches_standard_reader_and_reference_bits` in
+       `src/bit_reader/regression_tests.rs`.
+  - **What was tried and reverted:**
+    - Calling `fill_context_trees` eagerly in the `ProcessCommandsInternal`
+      prologue (`pbr3b`): ran on every `ProcessCommandsInternal` invocation and
+      increased outer-loop register pressure (`lr` spilled), adding 14M–16M
+      instructions on `wiki-Brotli.html` and `jquery-3.7.1.min.js` q5 static.
+      Reverted back to lazy `Option<[&LiteralTree; 64]>`.
+  - **Android Cortex-A53 (`thumbv7neon-unknown-linux-gnueabihf`, `-C
+    target-cpu=cortex-a53`, stable `rustc 1.99.1`):**
+    - `simpleperf stat` (1000 iterations, `q5 static`):
+      - `wiki-Brotli.html`: C `3,082.8M` instructions / `3,297.8M` cycles
+        (`160.5 MiB/s`); Rust `6082a30` `3,780.3M` / `4,004.4M` (`125.4 MiB/s`);
+        **Rust `45d09e0` `3,573.3M` instructions (-206.9M, -29.7% of excess over
+        C) / `3,783.9M` cycles (`136.4 MiB/s`, +8.8%)**.
+      - `jquery-3.7.1.min.js`: C `2,386.2M` instructions / `2,388.6M` cycles
+        (`82.4 MiB/s`); Rust `6082a30` `2,818.9M` / `2,866.7M` (`68.4 MiB/s`);
+        **Rust `45d09e0` `2,626.1M` instructions (-192.8M, -44.6% of excess over
+        C) / `2,639.3M` cycles (`74.3 MiB/s`, +8.6%)**.
+    - 144-cell decode benchmark (`docs/baseline/bench-2026-10-31-android-neon-direct-pbr5.csv`
+      vs `6082a30`): **+6.7% static std, +7.9% static dict, +4.0% flushed std,
+      +3.9% flushed dict (+5.5% overall across all 144 cells)**, narrowing the
+      Rust Direct vs C gap from `-14.7%` to **`-10.3%`** (`-13.0% / -5.3% /
+      -12.0% / -6.1%`).
+  - **Apple M5 Max (`arm64`, 144 cells, `docs/baseline/bench-2026-10-31-mac-m5max-*-pbr5.csv`):**
+    - **Direct API**: **+6.3% / +7.3% / +3.7% / +3.8% faster than `05ee043`**,
+      reaching **`+18.3% / +15.9% / +14.3% / +14.3%` vs C** (`+18.9% / +24.9% /
+      +22.7% / +30.5%` vs baseline `2ed02ed`).
+    - **C FFI**: **+8.2% / +9.8% / +5.8% / +5.5% faster than `05ee043`**,
+      reaching **`+18.4% / +15.2% / +14.0% / +12.7%` vs C** (`+19.3% / +24.2% /
+      +22.4% / +28.2%` vs baseline `2ed02ed`).
+  - **Linux i9-11900KF (@ 3.5 GHz, 144 cells, `docs/baseline/bench-2026-10-31-linux-native-*-pbr5.csv`):**
+    - **Direct API**: **`+3.6% / +8.9% / +5.0% / +7.5%` vs C** (`+8.3% / +17.4% /
+      +11.2% / +17.5%` vs baseline `2ed02ed`, within `<0.7%` noise of `05ee043`).
+    - **C FFI**: **`+3.9% / +10.5% / +4.8% / +8.4%` vs C** (`+8.3% / +17.4% /
+      +11.2% / +17.5%` vs baseline `2ed02ed`).
+  - **Gates:** `--verify` 600/600 decode parity (440/600 exact) on both `linux`
+    x86-64 and Android ARMv7, dict-span repro 4/4 pass, `scripts/test_armv7.sh`
+    (debug and `--release` under `qemu-arm`) pass, `cargo test --release` x86-64
+    passes (125 tests), default-feature `cargo build --release`
+    (`forbid(unsafe_code)`) passes, zero added `unsafe`. Pushed `perf`
+    (`45d09e0`) to `pmeenan/rust-brotli-decompressor`, deleted temporary
+    `persistent-br` branch, and updated submodule pointer.
 
 ## Maintaining documentation
 
