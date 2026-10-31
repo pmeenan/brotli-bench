@@ -545,6 +545,95 @@ numbers with the exact command, machine, and commit SHAs.
     - Table lookup `kBitMask[(n & 63) as usize]` in `BitMask(n)` on non-BMI2
       `x86_64`: tested on `linux` generic `x86-64` + ThinLTO; within run-to-run
       noise (`+0.6%` static standard, `-0.6%` flushed dictionary). Reverted.
+- **2026-10-31** - Optimized the built-in C FFI (`SubclassableAllocator`) and
+  32-bit ARMv7 (`vendor/rust-brotli-decompressor:perf`, commits `fd8b2e8` and
+  `05ee043`):
+  - **Commit `fd8b2e8` (`dec: eliminate FFI SubclassableAllocator drop-glue and
+    state copy overhead`):**
+    - Wrapped `MemoryBlock<Ty>`'s `Box<[Ty]>` in `ManuallyDrop` and removed its
+      `Drop` impl in `src/ffi/alloc_util.rs`. `MemoryBlock<Ty>` only holds
+      primitive/Copy types (`u8`, `u32`, `HuffmanCode`, `u16`) and must be freed
+      via `Allocator::free_cell`; its `Drop` impl caused LLVM to emit dead
+      element-by-element drop-glue loops across `LiteralTree`, `CommandTree`,
+      and `BrotliState` fields in `BrotliDecoderCreateInstance`,
+      `BrotliDecoderDestroyInstance`, and `ProcessCommandsInternal` when
+      instantiated with `SubclassableAllocator` (C FFI).
+    - Constructed `BrotliDecoderState` via `BrotliState::new_strict` directly in
+      `BrotliDecoderCreateInstance` and used `core::ptr::drop_in_place` in
+      `BrotliDecoderDestroyInstance` (`src/ffi/mod.rs`) instead of copying ~7 KB
+      onto the stack with `core::ptr::read`.
+    - Iterated only over `0..s.compound_dictionary.num_chunks` in
+      `BrotliStateCleanup` (`src/state.rs`).
+  - **Commit `05ee043` (`dec: add 32-bit bit-reader and bounds-check fast paths
+    for ARMv7`):**
+    - Root-caused why the earlier `reg_t = u32` attempt had regressed:
+      `BrotliGetBitsUnmasked` had still returned `u64`, `BrotliLoad16LE` had
+      used byte-by-byte shifting instead of `u16::from_le_bytes` on a 2-byte
+      subslice (`input.get(br.byte_pos..br.byte_pos + 2)`, which compiles to a
+      single `ldrh` on ARMv7), and `BrotliSafeReadBits`'s `n_bits > 16` split
+      path had been inlined into every call site instead of outlined into a
+      `#[cold] BrotliSafeReadBits32Slow` helper.
+    - Enabled the complete 32-bit bit-reader (`reg_t = u32`,
+      `BROTLI_SHORT_FILL_BIT_WINDOW_READ = 2`, 32-bit `BitMask`, `u16::from_le_bytes`
+      in `BrotliLoad16LE`, and `#[cold] BrotliSafeReadBits32Slow`) on non-64-bit
+      targets (`#[cfg(not(any(target_pointer_width = "64", test)))]`), while
+      keeping 64-bit targets unchanged.
+    - Switched `ReadDistanceInternal` distance arithmetic to `u32` (saving 20M
+      instructions on `x86_64` `wiki-Brotli.html` q5 static and avoiding 64-bit
+      sign-extension/shifts on 32-bit ARMv7), added `load_huffman_code` using
+      `slice::get` on 32-bit targets to eliminate panic bounds checks on Huffman
+      subtable lookups, and used slice pattern matching / `slice::get` in
+      `memmove16` and `memcpy_within_slice` on 32-bit targets.
+  - **What was tried and reverted:**
+    - Replacing `BrotliLoad32LE` / `BrotliLoad64LE` on 64-bit targets with
+      `match input.get(...) { Some(...) => ..., _ => 0 }`: added a conditional
+      zero-fallback branch on every 64-bit refill (+192M instructions on `x86_64`
+      `wiki-Brotli.html` q5 static). Kept `fast!` on 64-bit targets.
+    - Extracting `let mut state = ...; let mut br = ...;` and `let mut
+      context_trees: [&LiteralTree; 64]` at the top of `ProcessCommandsInternal`:
+      helped 32-bit ARMv7 slightly, but pushed `x86_64` over its 16-register
+      limit inside the fast literal loop, causing 3 stack spills + 3 reloads per
+      literal (+644M to +1.07B instructions on `x86_64`, -2.5% throughput).
+      Reverted.
+    - Adding `#[inline]` to `BrotliStateCleanupAfterMetablock`: hurt code layout
+      in `BrotliDecompressStream` on `x86_64`. Reverted.
+  - **1-byte fixed per-stream decode cost (`q6 static`, no dict / 64 KB dict):**
+    - `linux` (i9-11900KF @ 3.5 GHz, 50k iters): C `0.33 / 0.40 us`, **Rust FFI
+      `0.44 / 0.46 -> 0.32 / 0.33 us` (faster than C)**, **Rust Direct
+      `0.29 / 0.31 -> 0.26 / 0.28 us` (21–30% faster than C)**.
+    - `mac` (Apple M5 Max, 50k iters): C `0.21 / 0.21 us`, Rust FFI
+      `0.42 / 0.25 -> 0.38 / 0.25 us`, **Rust Direct `0.21 / 0.12 -> 0.17 /
+      0.12 us` (19–43% faster than C)**.
+    - Android Cortex-A53 (`armv7l`, 10k iters): C `2.38 / 2.46 us`, **Rust FFI
+      `4.23 / 4.31 -> 2.77 / 2.85 us` (-35%)**, **Rust Direct
+      `3.08 / 3.15 -> 2.46 / 2.69 us` (-15% to -20%)**.
+  - **144-cell decode benchmark (`05ee043`, CSVs in
+    `docs/baseline/bench-2026-10-30-*-post-opt.csv`):**
+    - `linux` native + fat LTO: **FFI `+2.6% / +11.4% / +4.1% / +8.5%` vs C**
+      (`+6.6% / +18.9% / +10.1% / +17.5%` vs baseline `2ed02ed`); **Direct
+      `+2.3% / +10.8% / +3.9% / +7.8%` vs C** (FFI and Direct at parity).
+    - `linux` generic `x86-64` + ThinLTO: FFI `-4.7% / +4.6% / -5.9% / -0.7%`
+      vs C (**`+7.4% / +17.4% / +9.4% / +14.7%` vs baseline**); Direct
+      `-4.8% / +4.7% / -6.1% / -1.3%` vs C (**`+7.3% / +17.7% / +9.1% / +14.8%`
+      vs baseline**).
+    - `mac` Apple M5 Max (`arm64`): **FFI `+10.4% / +5.7% / +8.1% / +6.4%` vs
+      C** (`+10.3% / +13.1% / +15.7% / +21.5%` vs baseline); **Direct `+12.6% /
+      +9.4% / +11.1% / +10.8%` vs C** (`+11.8% / +16.4% / +18.3% / +25.7%` vs
+      baseline).
+    - Android Cortex-A53 (`armv7l` 32-bit): FFI improved by another
+      `+2.7% / +1.1% / +5.3% / +8.4%` over `081c5d9` FFI to `-21.5% / -15.8% /
+      -19.6% / -15.1%` vs C (**`+12.1% / +17.2% / +21.4% / +28.9%` vs baseline
+      `2ed02ed` FFI**); Direct improved to `-19.6% / -12.2% / -16.7% / -10.0%`
+      vs C (**`+15.1% / +20.8% / +26.4% / +35.2%` vs baseline `2ed02ed` FFI**).
+      The remaining gap on 32-bit in-order ARMv7 is structural to
+      `#![forbid(unsafe_code)]` (slice bounds checks on every bit-reader refill
+      and Huffman subtable lookup, fat `(ptr, len)` slice pairs on a 15-register
+      32-bit register file, and `calloc` zero-initialization of the ringbuffer).
+  - **Gates:** `--verify` 600/600 decode parity (440/600 exact), default-feature
+    `cargo build --release` (`forbid(unsafe_code)`) passes, `cargo test --release`
+    passes (124 lib + integration tests), fuzz targets pass, zero added `unsafe`.
+    Pushed `perf` (`05ee043`) to `pmeenan/rust-brotli-decompressor` and updated
+    submodule pointer.
 
 ## Maintaining documentation
 

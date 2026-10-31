@@ -167,7 +167,7 @@ Reading:
 
 ## Workstreams (in priority order)
 
-1. **Hot command loop (`ProcessCommandsInternal`, `decode.rs`) — DONE (`081c5d9`, `0466359`).**
+1. **Hot command loop (`ProcessCommandsInternal`, `decode.rs`) — DONE (`081c5d9`, `0466359`, `05ee043`).**
    - Introduced fixed-size array types (`LiteralTree = [HuffmanCode; 632]`,
      `CommandTree = [HuffmanCode; 1080]`, `HuffmanRootTable = [HuffmanCode; 256]`)
      so tree pointers are thin 8-byte references and 8-bit root-table lookups
@@ -188,8 +188,20 @@ Reading:
      (`0466359`), bound `s.ringbuffer.slice_mut()` once in backward copy and
      wrap-copy states, and eliminated 6 dead `MemoryBlock::drop` checks when
      restoring `saved_*_hgroup` on exit from `ProcessCommandsInternal`.
-2. **Bit reader (`bit_reader/mod.rs`) — DONE (`0466359`).**
-   - Unified `BrotliFillBitWindow` with `BrotliFillBitWindowCompileTimeNbits`.
+   - Switched `ReadDistanceInternal` distance arithmetic to `u32` (saving 20M
+     instructions on `x86_64` and avoiding 64-bit sign-extension/shifts on
+     32-bit ARMv7), added `load_huffman_code` using `slice::get` on 32-bit
+     targets to eliminate panic bounds checks on Huffman subtable lookups, and
+     used slice pattern matching / `slice::get` in `memmove16` and
+     `memcpy_within_slice` on 32-bit targets (`05ee043`).
+2. **Bit reader (`bit_reader/mod.rs`) — DONE (`0466359`, `05ee043`).**
+   - Unified `BrotliFillBitWindow` with `BrotliFillBitWindowCompileTimeNbits`
+     (`0466359`).
+   - Added a dedicated 32-bit bit-reader configuration on non-64-bit targets
+     (`reg_t = u32`, `BROTLI_SHORT_FILL_BIT_WINDOW_READ = 2`, 16-bit unaligned
+     refills via `u16::from_le_bytes` on a 2-byte subslice, 32-bit `BitMask`,
+     and `#[cold]` out-of-line `BrotliSafeReadBits32Slow` for `n_bits > 16`)
+     matching C's `BROTLI_64_BITS == 0` path (`05ee043`).
 3. **Prefix-code setup (`ReadHuffmanCode`, `BrotliBuildHuffmanTable`,
    `ReplicateValue`, context maps) — DONE (`1344c34`).**
    - Replaced signed modulo (`idiv`) in `ReplicateValue` with a power-of-two
@@ -201,9 +213,17 @@ Reading:
      `ProcessRepeatedCodeLength`, used slice fill for `symbols_lists_array`,
      and hoisted bounds checks out of `InverseMoveToFrontTransform`,
      `DecodeContextMapInner`, and `DetectTrivialLiteralBlockTypes`.
-4. **Fixed per-stream costs — DONE (`1344c34`, `081c5d9`).**
-   - 1-byte decode time improved from 0.46 to 0.43 us (0.49 to 0.45 us with a
-     64 KB dictionary) on `linux`.
+4. **Fixed per-stream costs — DONE (`1344c34`, `081c5d9`, `fd8b2e8`).**
+   - Eliminated `SubclassableAllocator` (`MemoryBlock<Ty>`) drop-glue loops by
+     wrapping its `Box<[Ty]>` in `ManuallyDrop`, constructed `BrotliDecoderState`
+     directly via `BrotliState::new_strict` in `BrotliDecoderCreateInstance`,
+     dropped in place via `core::ptr::drop_in_place` in
+     `BrotliDecoderDestroyInstance` (eliminating a ~7 KB stack copy), and
+     iterated only over `0..num_chunks` in `BrotliStateCleanup` (`fd8b2e8`).
+   - 1-byte FFI decode time on `linux` dropped from `0.46 -> 0.32 us` (`64 KB
+     dict`: `0.49 -> 0.33 us`), beating C (`0.33 / 0.40 us`); Direct API reaches
+     `0.26 / 0.28 us`. On Android Cortex-A53 (`armv7l`), 1-byte FFI decode
+     dropped from `4.23 -> 2.77 us` (`-35%`).
    - Note: LBR profiling shows the remaining ~1% `__memset_evex_unaligned_erms`
      on static streams is `calloc` zero-filling the ringbuffer slice and initial
      Huffman `codes` slice, which is required by safe Rust's initialized slice
@@ -214,65 +234,65 @@ Reading:
      freeing and reallocating them on every metablock in flushed mode.
    - Marked `SafeReadSymbol` and `ReadBlockLength` `#[inline(always)]`.
    - Flushed decode geomean improved from -6.2% / -9.8% vs C to +2.7% / +6.3%
-     vs C on `linux`.
+     vs C on `linux` (600 cells) and +4.1% / +8.5% on the 144-cell subset.
 6. **Dictionary decode — DONE (`081c5d9`).**
    - Added an inline single-chunk compound dictionary fast path in
      `ProcessCommandsInternal` using `transform::copy_bytes` when
      `s.compound_dictionary.num_chunks == 1`, and skipped
      `EnsureCompoundDictionaryInitialized` for single-chunk dictionaries.
    - Dictionary decode geomean improved from -8.5% (static) / -9.8% (flushed)
-     vs C to +6.4% (static) / +6.3% (flushed) vs C on `linux`.
+     vs C to +6.4% (static) / +6.3% (flushed) vs C on `linux` (600 cells) and
+     +11.4% / +8.5% on the 144-cell subset.
 7. **Build configuration realism — DONE.**
    - Added `-DBROTLI_BENCH_C_ARCH_FLAGS=""` to `CMakeLists.txt` so C and Rust can
      be built with Chromium-like generic x86-64 flags (`-DBROTLI_BENCH_C_ARCH_FLAGS=""
      -DBROTLI_BENCH_RUSTFLAGS="" -DBROTLI_BENCH_RUST_LTO=thin`).
    - On `linux` (i9-11900KF @ 3.5 GHz, 144-cell default subset), the `perf`
-     (`081c5d9`) speedup over baseline (`2ed02ed`) holds under generic x86-64 +
-     ThinLTO: `+7.1%` static standard (`-10.5% -> -4.2% vs C`), `+17.0%` static
-     dictionary (`-10.2% -> +4.6% vs C`), `+9.5%` flushed standard
-     (`-12.5% -> -4.9% vs C`), `+15.6%` flushed dictionary (`-13.9% -> -0.3% vs C`).
+     (`05ee043`) speedup over baseline (`2ed02ed`) holds under generic x86-64 +
+     ThinLTO: `+7.4%` static standard (`-10.5% -> -4.7% vs C`), `+17.4%` static
+     dictionary (`-10.2% -> +4.6% vs C`), `+9.4%` flushed standard
+     (`-12.5% -> -5.9% vs C`), `+14.7%` flushed dictionary (`-13.9% -> -0.7% vs C`).
    - Also tested replacing `BitMask(n)`'s shift expression with a `kBitMask`
      lookup on non-BMI2 `x86_64`; it was within noise (`+0.6%` static standard,
      `-0.6%` flushed dictionary) and was reverted.
-8. **Integration path check (C FFI vs direct Rust API) — DONE.**
+8. **Integration path check & FFI optimization (C FFI vs direct Rust API) — DONE (`fd8b2e8`, `05ee043`).**
    - Added `RustDirectBrotliApi` (`rust/lib.rs`, `src/streaming_harness.h`) and
-     `--rust-api <ffi|direct>` (`brotli_compare`, `bench_rust`) to benchmark both
-     the C FFI (`BrotliDecoderDecompressStream`, which boxes a `BrotliDecoderState`
-     containing custom allocator function pointers and C-callable wrapper fns)
-     and a thin wrapper around the direct Rust API
-     (`BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>` +
-     `BrotliDecompressStream`).
-   - **1-byte fixed per-stream decode cost:**
+     `--rust-api <ffi|direct>` (`brotli_compare`, `bench_rust`), then optimized
+     the built-in C FFI (`src/ffi/alloc_util.rs`, `src/ffi/mod.rs`,
+     `src/state.rs`) in `fd8b2e8` so C FFI callers get nearly identical
+     performance to Direct Rust API callers.
+   - **1-byte fixed per-stream decode cost (`05ee043`):**
      - `linux` (i9-11900KF @ 3.5 GHz): C `0.33 us` (`0.40 us` w/ 64 KB dict),
-       Rust FFI `0.44 us` (`0.46 us`), **Rust Direct `0.29 us` (`0.31 us`) —
-       13–31% faster than C and 33–34% lower latency than FFI**.
-     - `mac` (Apple M5 Max): C `0.21 us` (`0.21 us`), Rust FFI `0.42 us`
-       (`0.25 us`), **Rust Direct `0.21 us` (`0.12 us`) — matches or beats C and
-       is 2x faster than FFI**.
-     - Android (Cortex-A53 @ 2.30 GHz, 32-bit `armv7l`): C `2.15 us`
-       (`2.46 us`), Rust FFI `4.23 us` (`4.31 us`), **Rust Direct `3.08 us`
-       (`3.15 us`) — 27% lower latency than FFI**.
-   - **Full streaming decode throughput (Direct vs FFI, 144-cell default subset):**
-     - `linux` (native + fat LTO): Direct is `+0.2%` to `+0.4%` faster than FFI
-       (`+2.6%` static standard, `+9.8%` static dictionary, `+4.2%` flushed
-       standard, `+7.8%` flushed dictionary vs C).
-     - `mac` (Apple M5 Max `arm64`): Direct is **`+2.5%` to `+2.8%` faster than
-       FFI**, reaching **`+11.8%` static standard, `+8.2%` static dictionary,
-       `+11.2%` flushed standard, and `+10.2%` flushed dictionary vs C** (with
-       FFI already at `+8.7% / +5.8% / +7.4% / +6.7% vs C`).
-     - Android (Cortex-A53 32-bit `armv7l`): Direct is **`+2.5%` to `+7.9%`
-       faster than FFI** (`-20.9%` vs `-24.1%` static standard, `-12.0%` vs
-       `-16.7%` static dictionary, `-20.2%` vs `-23.5%` flushed standard,
-       `-14.2%` vs `-19.7%` flushed dictionary vs C; overall `+9.1%` to `+18.9%`
-       faster than baseline `2ed02ed`). Also tested `reg_t = u32` on 32-bit
-       `armv7`, which regressed by 1.5–3.9% because refilling a 32-bit bit
-       window every 16 bits via byte loads is slower than refilling 32–48 bits
-       at once in a 64-bit bit window via `from_le_bytes`; reverted.
+       **Rust FFI `0.32 us` (`0.33 us`) — faster than C**, **Rust Direct
+       `0.26 us` (`0.28 us`) — 21–30% faster than C**.
+     - `mac` (Apple M5 Max): C `0.21 us` (`0.21 us`), Rust FFI `0.38 us`
+       (`0.25 us`), **Rust Direct `0.17 us` (`0.12 us`) — 19–43% faster than C**.
+     - Android (Cortex-A53 @ 2.30 GHz, 32-bit `armv7l`): C `2.38 us`
+       (`2.46 us`), **Rust FFI `2.77 us` (`2.85 us`) — 35% lower latency than
+       `081c5d9` (`4.23 / 4.31 us`)**, **Rust Direct `2.46 us` (`2.69 us`)**.
+   - **Full streaming decode throughput (`05ee043`, 144-cell default subset):**
+     - `linux` (native + fat LTO): FFI is **`+2.6%` static standard, `+11.4%`
+       static dictionary, `+4.1%` flushed standard, `+8.5%` flushed dictionary
+       vs C**; Direct is **`+2.3% / +10.8% / +3.9% / +7.8%` vs C** (FFI and
+       Direct are now at parity).
+     - `mac` (Apple M5 Max `arm64`): FFI is **`+10.4% / +5.7% / +8.1% / +6.4%`
+       vs C** (`+10.3%..+21.5%` vs baseline `2ed02ed`); Direct is **`+12.6% /
+       +9.4% / +11.1% / +10.8%` vs C** (`+11.8%..+25.7%` vs baseline).
+     - Android (Cortex-A53 32-bit `armv7l`): FFI improved to `-21.5% / -15.8% /
+       -19.6% / -15.1%` vs C (**`+12.1% / +17.2% / +21.4% / +28.9%` faster than
+       baseline `2ed02ed` FFI**); Direct improved to `-19.6% / -12.2% / -16.7% /
+       -10.0%` vs C (**`+15.1% / +20.8% / +26.4% / +35.2%` faster than baseline
+       `2ed02ed` FFI**). The remaining gap on 32-bit in-order ARMv7 is structural
+       to `#![forbid(unsafe_code)]`: slice bounds checks on every bit-reader
+       refill (`input.get`) and Huffman subtable lookup (`table.get`) plus fat
+       `(ptr, len)` slice references on a 15-register 32-bit file and mandatory
+       `calloc` zero-initialization of the ringbuffer.
 
 ## Deliverables and upstreaming
 
 - Small, self-contained commits on `rust-brotli-decompressor:perf`, each
-  with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`).
+  with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`,
+  `fd8b2e8`, `05ee043`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.
