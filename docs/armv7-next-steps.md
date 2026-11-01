@@ -4,18 +4,18 @@ These are ideas for closing the remaining gap between the safe Rust decoder and 
 
 ## Where things stand
 
-- Fork: `vendor/rust-brotli-decompressor` `perf` at `afe3536`.
+- Fork: `vendor/rust-brotli-decompressor` `perf` at `73b34c7`.
 - Android Cortex-A53, Thumb-2 + NEON on both sides, 144 cells (stable `rustc 1.99.1`):
   - Before `45d09e0` (`6082a30`): Direct -14.7% overall (-18.0% / -11.3% / -15.4% / -10.5% static std / static dict / flushed std / flushed dict); FFI (`05ee043`) -21.5% / -15.8% / -19.6% / -15.1%;
   - After `45d09e0`: Direct -10.3% overall (-13.0% / -5.3% / -12.0% / -6.1%);
   - After `d536284`: Direct -4.2% overall (-6.4% / +0.4% / -5.5% / -1.6%); FFI -7.0% / -0.3% / -6.0% / -1.6%;
   - After `03ac41a` + `d889cc0` + `32e41d6`: Direct -0.7% overall (-2.5% / +4.7% / -2.8% / +2.0%); FFI -1.8% overall (-3.7% / +3.4% / -3.7% / +0.9%);
-  - After `afe3536` (`docs/baseline/bench-2026-11-01-android-neon-*-pbr35.csv`):
-    - **Rust Direct vs C: `+0.77%` faster than C overall (`-1.3%` static std, `+5.5%` static dict, `-0.8%` flushed std, `+3.5%` flushed dict; `+0.9%` static overall, `+0.6%` flushed overall)** — **+22.8% faster than `05ee043`**;
-    - **Rust FFI vs C: `+1.16%` faster than C overall (`-1.0%` static std, `+6.1%` static dict, `-0.4%` flushed std, `+3.8%` flushed dict; `+1.3%` static overall, `+1.0%` flushed overall)** — up from `-31.1%` at baseline `2ed02ed`;
-    - **Safe Rust now beats C overall on 32-bit ARMv7 in both Direct (`+0.77%`) and FFI (`+1.16%`) modes, and in both static (`+0.9%` / `+1.3%`) and flushed (`+0.6%` / `+1.0%`) modes.**
-- On `wiki-Brotli.html` q5 static (500 iterations, stable `rustc 1.99.1`), `03ac41a` + `d889cc0` + `afe3536` cuts Rust Direct instructions from `1,890.1M` (`6082a30`) -> `1,744.8M` (`45d09e0`) -> `1,639.5M` (`d536284`) -> `1,598.7M` (`d889cc0`) -> **`1,583.3M` (within 2.7% of C's `1,541.4M`)**; on `bootstrap-5.3.3.min.css`, `afe3536` cuts another `27K–98K` instructions/decode across `static` and `flushed` `q5`/`q11` (`bootstrap` static overall `-7.7% -> -5.7%`, flushed overall `-4.8% -> -3.1%`).
-- The remaining `-0.4%` to `-1.3%` non-dictionary gap on 32-bit ARMv7 is less than half of the ~2.5–3% cost of **ring buffer zero-initialization (`calloc`/`memset`)**: safe Rust must zero-initialize the ring buffer slice before forming `&mut [u8]`, whereas C calls `malloc`.
+  - After `afe3536`: Direct +0.77% overall (-1.3% / +5.5% / -0.8% / +3.5%); FFI +1.16% overall (-1.0% / +6.1% / -0.4% / +3.8%);
+  - After `73b34c7` (`docs/baseline/bench-2026-11-01-android-neon-*-pbr36.csv`):
+    - **Rust Direct vs C: `+4.5%` faster than C overall (`+4.0%` static std, `+8.9%` static dict, `+2.8%` flushed std, `+4.6%` flushed dict; `114/144` cells beat C)** — **`+5.5%` static std and `+5.3%` flushed std faster than `afe3536`**;
+    - **Rust FFI vs C: `+5.3%` faster than C overall (`+4.9%` static std, `+10.4%` static dict, `+3.0%` flushed std, `+5.8%` flushed dict; `117/144` cells beat C)** — **`+6.2%` static std and `+3.6%` flushed std faster than `afe3536`**, up from `-31.1%` at baseline `2ed02ed`;
+    - **Safe Rust now beats C across every category on 32-bit ARMv7 (`static std`, `static dict`, `flushed std`, and `flushed dict`) in both Direct and FFI modes.**
+- On `wiki-Brotli.html` q5 static (500 iterations, stable `rustc 1.99.1`), `03ac41a` + `d889cc0` + `afe3536` + `73b34c7` cuts Rust Direct instructions from `1,890.1M` (`6082a30`) -> `1,744.8M` (`45d09e0`) -> `1,639.5M` (`d536284`) -> `1,598.7M` (`d889cc0`) -> `1,583.3M` (`afe3536`) -> **`1,511.7M` (1.9% fewer instructions and 3.9% fewer cycles than C's `1,541.4M`)**; on `bootstrap-5.3.3.min.css`, `73b34c7` brings `static` to `-1.5%` Direct / `-0.7%` FFI vs C and `flushed` to `-0.3%` Direct / `+0.1%` FFI vs C (where the remaining ~1% static gap on `bootstrap` is glibc `calloc` ringbuffer zero-initialization).
 
 ## Tooling (all on the dev VM; the device hangs off `linux` via adb)
 
@@ -78,6 +78,12 @@ Restored C's 32-bit `n_bits <= 8` refill path in `BrotliFillBitWindowCompileTime
 ### 8. `HuffmanCode` layout (`BROTLI_HUFFMAN_CODE_FAST_LOAD`) — **LANDED (`03ac41a`)**
 
 - Reordered `pub struct HuffmanCode` in `src/huffman/mod.rs` (and `HuffmanCodeStruct` in `c/brotli/decode.h`) on `#[cfg(not(target_pointer_width = "64"))]` to `{ pub bits: u8, pad: u8, pub value: u16 }` (`#[repr(C, align(4))]`), matching C's `BROTLI_HUFFMAN_CODE_FAST_LOAD` layout while keeping `{ pub value: u16, pub bits: u8 }` on 64-bit targets. In `load_huffman_code` on 32-bit targets, outlined `load_huffman_code_into` (no `#[inline]`) using `clone_from_slice` on a 1-element `[HuffmanCode; 1]` slot so rustc's MIR inliner leaves `dst` as a pointer parameter until LLVM's CGSCC pass folds the 4-byte `memcpy` into a single `load i32, align 4` before SROA. Every Huffman lookup on 32-bit ARMv7 now compiles to a single `ldr.w Rd, [Rn, Rm, lsl #2]` followed by `uxtb`/`uxtab` (`bits`) and `lsr #16` (`value`), saving **85M–110M instructions** on `wiki-Brotli.html` and `bootstrap-5.3.3.min.css` on Cortex-A53 without any `unsafe` or API breakage.
+
+### 9. Pre-resolved `distance_roots`, folded per-copy bounds check, and power-of-two LUT masking — **LANDED (`73b34c7`)**
+
+- Pre-resolved `distance_roots: [&HuffmanRootTable; 4]` via `load_distance_roots` at `!safe` entry of `ProcessCommandsInternal` and after `DecodeDistanceBlockSwitch`, removing `dist_context_map` from `ReadCommandInternal` (freeing a live register across `ReadCommandInternal` so `BrotliFastBitReader` keeps both `tail.ptr` and `tail.len` in registers on 32-bit ARM without stack spills) and eliminating the per-distance `distance_root_table` call at `q10`/`q11`.
+- Moved the overlap (`hi - lo < copy_len_u`) and wrap (`hi.wrapping_add(copy_len_u) >= s.ringbuffer_size as u32`) checks ahead of `memmove16_from_ringbuffer` in `BROTLI_STATE_COMMAND_POST_DECODE_LITERALS` so `memmove16_from_ringbuffer` shares `hi = max(dst_start, src_start)` with the overlap/wrap check, and marked `memcpy_within_slice` `#[cfg_attr(not(target_pointer_width = "64"), inline(never))]`.
+- Padded `kCmdLut` (`704 -> 1024` entries) and `kBlockLengthPrefixCode` (`26 -> 32` entries) in `src/prefix.rs` and indexed with `& 1023` and `& 31` (`load_cmd_lut` compiles to a single Thumb-2 `bfc r3, #10, #22`).
 
 ## Not worth retrying
 

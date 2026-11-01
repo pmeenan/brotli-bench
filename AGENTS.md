@@ -1209,6 +1209,100 @@ numbers with the exact command, machine, and commit SHAs.
     50/50 pass (Direct and FFI), `cargo test --release` x86-64 passes, zero
     added `unsafe`. Pushed `perf` (`afe3536`) to
     `pmeenan/rust-brotli-decompressor` and updated submodule pointer.
+- **2026-11-01** - Pre-resolved `distance_roots`, folded per-copy bounds check,
+  power-of-two LUT masking, and chunk-boundary stress test
+  (`vendor/rust-brotli-decompressor:perf`, commit `73b34c7`):
+  - **Changes landed (`73b34c7`):**
+    1. **Pre-resolved `distance_roots: [&HuffmanRootTable; 4]`
+       (`src/decode.rs`):** Added `load_distance_roots` to pre-resolve the 4
+       distance `HuffmanRootTable` slices at `!safe` entry of
+       `ProcessCommandsInternal` and after `DecodeDistanceBlockSwitch`. This
+       removes `dist_context_map` from `ReadCommandInternal` (freeing a live
+       register across `ReadCommandInternal` so `BrotliFastBitReader` keeps both
+       `tail.ptr` and `tail.len` in registers on 32-bit ARM without stack
+       spills) and eliminates the per-distance `distance_root_table` call at
+       `q10`/`q11` when `s.dist_htree_index` changes.
+    2. **Folded per-copy `memmove16_from_ringbuffer` bounds check into the
+       overlap + wrap checks (`src/decode.rs`):** Moved the overlap (`hi - lo <
+       copy_len_u`) and wrap (`hi.wrapping_add(copy_len_u) >=
+       s.ringbuffer_size as u32`) checks ahead of `memmove16_from_ringbuffer` in
+       `BROTLI_STATE_COMMAND_POST_DECODE_LITERALS` so
+       `memmove16_from_ringbuffer` shares `hi = max(dst_start, src_start)` with
+       the overlap/wrap check, and marked `memcpy_within_slice`
+       `#[cfg_attr(not(target_pointer_width = "64"), inline(never))]` to reduce
+       32-bit register pressure in `ProcessCommands`.
+    3. **Power-of-two LUT padding and bitmask indexing (`src/prefix.rs`,
+       `src/decode.rs`):** Padded `kCmdLut` (`704 -> 1024` entries) and
+       `kBlockLengthPrefixCode` (`26 -> 32` entries) using `const` array
+       builders and indexed with `& 1023` and `& 31`, replacing the 3-instruction
+       clamp in `load_cmd_lut` with a single Thumb-2 `bfc r3, #10, #22`
+       instruction.
+    4. **Review nits & stress test (`src/huffman/mod.rs`, `src/decode.rs`,
+       `src/test.rs`):** Added `debug_assert!(step > 0 && end >= step && (end %
+       step) == 0)` + `end.wrapping_sub(step)` in `replicate_value_pow2`, added
+       `debug_assert!(idx < symbol_lists.len())` in `ProcessSingleCodeLength`
+       and `ProcessRepeatedCodeLength`, and added
+       `test_streaming_chunk_boundaries_and_corruptions` in `src/test.rs`
+       (testing 1-byte and 17/18/19/27/28/29-byte chunk boundaries, random
+       truncations, and single-bit flips across 7 corpora at 6 qualities).
+  - **What was tried and reverted:**
+    - Adding `s.block_type_length_state.block_length[0] > 0` to the outer `if
+      !safe` guard in `BROTLI_STATE_COMMAND_INNER` (`pbr36b`): perturbed the
+      Thumb-2 register allocator in `ProcessCommands` into spilling
+      `br.tail.ptr` (`[sp, #56]`) in `ReadCommandInternal`. Reverted.
+  - **Measurements (`73b34c7`, 144-cell benchmark CSVs in
+    `docs/baseline/bench-2026-11-01-*-pbr36.csv`):**
+    - **Android Cortex-A53 (`thumbv7neon`, `cpu2` @ 2.30 GHz, stable `rustc 1.99.1`):**
+      - `simpleperf stat` (200 iterations):
+        - `wiki-Brotli.html` static `q5`: `73b34c7` uses **`630.7M` instructions
+          / `717.2M` cycles** vs `afe3536` `660.6M` instructions / `738.2M`
+          cycles (**`-4.5%` instructions**) and C `664.8M` instructions /
+          `745.9M` cycles (**`-5.1%` fewer instructions and `-3.9%` fewer cycles
+          than C**).
+        - `bootstrap-5.3.3.min.css` static `q5`: `73b34c7` uses **`552.1M`
+          instructions / `605.0M` cycles** vs `afe3536` `580.2M` instructions /
+          `633.0M` cycles (**`-4.8%` instructions**), cutting the cycle gap vs C
+          (`597.5M` cycles) by **79%**.
+      - **Rust Direct vs C (144 cells):** **`+4.5%` faster than C overall**
+        (**`+4.0%` static std, `+8.9%` static dict, `+2.8%` flushed std, `+4.6%`
+        flushed dict**; `114/144` cells beat C), up from `+0.8%` overall
+        (`-1.3% / +5.5% / -0.8% / +3.5%`) in `afe3536` (**`+5.5%` faster on
+        static std and `+5.3%` faster on flushed std than `afe3536`**).
+      - **Rust FFI vs C (144 cells):** **`+5.3%` faster than C overall**
+        (**`+4.9%` static std, `+10.4%` static dict, `+3.0%` flushed std,
+        `+5.8%` flushed dict**; `117/144` cells beat C), up from `+1.2%` overall
+        (`-1.0% / +6.1% / -0.4% / +3.8%`) in `afe3536` (**`+6.2%` faster on
+        static std and `+3.6%` faster on flushed std than `afe3536`**).
+      - Every non-dictionary corpus (`alice29.txt` `+4.9%`/`+5.9%` static,
+        `+2.7%`/`+3.1%` flushed; `jquery-3.7.1.min.js` `+9.9%`/`+10.6%` static,
+        `+7.0%`/`+7.2%` flushed; `wiki-Brotli.html` `+3.0%`/`+4.1%` static,
+        `+2.0%`/`+1.6%` flushed) beats C on geomean, and `bootstrap-5.3.3.min.css`
+        improves from `-5.7%`/`-5.9%` static and `-3.1%`/`-3.3%` flushed to
+        **`-1.5%`/`-0.7%` static and `-0.3%`/`+0.1%` flushed**.
+    - **Linux i9-11900KF (@ 3.5 GHz, 144 cells, `hostlock exclusive` +
+      `tune_benchmark_host.py`):**
+      - **Rust Direct vs C:** **`+9.4%` faster than C overall** (`+7.4%` static
+        std, `+15.3%` static dict, `+7.8%` flushed std, `+11.0%` flushed dict;
+        `143/144` cells beat C; **`+1.3%` faster on static std and `+2.6%` /
+        `+4.4%` faster at `q10`/`q11` than `afe3536`**).
+      - **Rust FFI vs C:** **`+9.1%` faster than C overall** (`+7.1%` static
+        std, `+15.2%` static dict, `+7.4%` flushed std, `+10.5%` flushed dict;
+        `144/144` cells beat C; **`+1.5%` faster on static std than `afe3536`**).
+    - **Apple M5 Max (`arm64`, 144 cells):**
+      - **Rust Direct vs C:** **`+16.7%` faster than C overall** (`+19.0%`
+        static std, `+15.9%` static dict, `+15.8%` flushed std, `+15.1%` flushed
+        dict; `144/144` cells beat C).
+      - **Rust FFI vs C:** **`+16.6%` faster than C overall** (`+18.9%` static
+        std, `+16.0%` static dict, `+15.6%` flushed std, `+14.8%` flushed dict;
+        `144/144` cells beat C; `+1.6%` to `+2.3%` faster at `q10`/`q11` than
+        `afe3536`).
+  - **Gates:** `--verify` 600/600 decode parity (440/600 exact) in Direct and
+    FFI modes, dict-span repro 2/2 pass, `scripts/test_armv7.sh` (including
+    `test_streaming_chunk_boundaries_and_corruptions` under `qemu-arm`) pass,
+    `cargo test --release` x86-64 passes (126 unit tests), default-feature
+    `cargo build --release` (`forbid(unsafe_code)`) passes, zero added `unsafe`.
+    Pushed `perf` (`73b34c7`) to `pmeenan/rust-brotli-decompressor` and updated
+    submodule pointer.
 
 ## Maintaining documentation
 

@@ -495,12 +495,70 @@ check.
     - **Rust FFI vs C:** **`+17.38%` overall** (`+20.8%` static std, `+17.1%`
       static dict, `+15.6%` flushed std, `+14.6%` flushed dict).
 
+**Landed (`73b34c7`):**
+- **Pre-resolved `distance_roots: [&HuffmanRootTable; 4]` (`src/decode.rs`):**
+  added `load_distance_roots` to pre-resolve all 4 distance `HuffmanRootTable`s
+  at `!safe` entry of `ProcessCommandsInternal` and after
+  `DecodeDistanceBlockSwitch`. Removing `dist_context_map` from
+  `ReadCommandInternal` frees a live register across `ReadCommandInternal` so
+  `BrotliFastBitReader` keeps both `tail.ptr` and `tail.len` in registers on
+  32-bit ARM without stack spills, and eliminates the per-distance
+  `distance_root_table` call at `q10`/`q11` when `s.dist_htree_index` changes.
+- **Folded per-copy `memmove16_from_ringbuffer` bounds check into the overlap +
+  wrap checks (`src/decode.rs`):** moved the overlap (`hi - lo < copy_len_u`)
+  and wrap (`hi.wrapping_add(copy_len_u) >= s.ringbuffer_size as u32`) checks
+  ahead of `memmove16_from_ringbuffer` in
+  `BROTLI_STATE_COMMAND_POST_DECODE_LITERALS` so `memmove16_from_ringbuffer`
+  shares `hi = max(dst_start, src_start)` with the overlap/wrap check, and
+  marked `memcpy_within_slice` `#[cfg_attr(not(target_pointer_width = "64"),
+  inline(never))]`.
+- **Power-of-two LUT padding and bitmask indexing (`src/prefix.rs`,
+  `src/decode.rs`):** padded `kCmdLut` (`704 -> 1024` entries) and
+  `kBlockLengthPrefixCode` (`26 -> 32` entries) using `const` array builders and
+  indexed with `& 1023` and `& 31`, compiling `load_cmd_lut` to a single
+  Thumb-2 `bfc r3, #10, #22` instruction.
+- **Review nits & stress test (`src/huffman/mod.rs`, `src/decode.rs`,
+  `src/test.rs`):** added `debug_assert!` preconditions in
+  `replicate_value_pow2` (with `end.wrapping_sub(step)`),
+  `ProcessSingleCodeLength`, and `ProcessRepeatedCodeLength`, and added
+  `test_streaming_chunk_boundaries_and_corruptions` in `src/test.rs`.
+- Cuts **`4.5%–4.8%` of all instructions** on `wiki-Brotli.html` (`660.6M ->
+  630.7M`, **5.1% fewer instructions and 3.9% fewer cycles than C**) and
+  `bootstrap-5.3.3.min.css` (`580.2M -> 552.1M`) on Cortex-A53 (`q5` static, 200
+  iterations), bringing **every benchmark category (`static std`, `static dict`,
+  `flushed std`, `flushed dict`) ahead of C on all three platforms**
+  (`docs/baseline/bench-2026-11-01-*-pbr36.csv`):
+  - **Android Cortex-A53 (`armv7l`, Thumb-2 + NEON):**
+    - **Rust Direct vs C:** **`+4.5%` overall** (**`+4.0%` static std, `+8.9%`
+      static dict, `+2.8%` flushed std, `+4.6%` flushed dict**; `114/144` cells
+      beat C, **`+5.5%` static std and `+5.3%` flushed std faster than
+      `afe3536`**).
+    - **Rust FFI vs C:** **`+5.3%` overall** (**`+4.9%` static std, `+10.4%`
+      static dict, `+3.0%` flushed std, `+5.8%` flushed dict**; `117/144` cells
+      beat C, **`+6.2%` static std and `+3.6%` flushed std faster than
+      `afe3536`**).
+  - **Linux i9-11900KF (@ 3.5 GHz, `x86_64`):**
+    - **Rust Direct vs C:** **`+9.4%` overall** (`+7.4%` static std, `+15.3%`
+      static dict, `+7.8%` flushed std, `+11.0%` flushed dict; `143/144` cells
+      beat C, **`+1.3%` faster on static std and `+2.6%`/`+4.4%` faster at
+      `q10`/`q11` than `afe3536`**).
+    - **Rust FFI vs C:** **`+9.1%` overall** (`+7.1%` static std, `+15.2%`
+      static dict, `+7.4%` flushed std, `+10.5%` flushed dict; `144/144` cells
+      beat C).
+  - **Apple M5 Max (`aarch64`):**
+    - **Rust Direct vs C:** **`+16.7%` overall** (`+19.0%` static std, `+15.9%`
+      static dict, `+15.8%` flushed std, `+15.1%` flushed dict; `144/144` cells
+      beat C).
+    - **Rust FFI vs C:** **`+16.6%` overall** (`+18.9%` static std, `+16.0%`
+      static dict, `+15.6%` flushed std, `+14.8%` flushed dict; `144/144` cells
+      beat C).
+
 ## Deliverables and upstreaming
 
 - Small, self-contained commits on `rust-brotli-decompressor:perf`, each
   with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`,
   `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`, `d536284`, `03ac41a`,
-  `d889cc0`, `32e41d6`, `afe3536`).
+  `d889cc0`, `32e41d6`, `afe3536`, `73b34c7`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.
