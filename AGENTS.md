@@ -897,11 +897,11 @@ numbers with the exact command, machine, and commit SHAs.
        pub value: u16 }` (`#[repr(C, align(4))]`), matching C's
        `BROTLI_HUFFMAN_CODE_FAST_LOAD` layout (`bits` in byte 0, `value` in
        bytes 2..3), while keeping `{ pub value: u16, pub bits: u8 }` on 64-bit
-       targets. In `load_huffman_code` on 32-bit targets, added a dummy
-       volatile read on the unreachable out-of-bounds `None` fallback arm to
-       prevent SimplifyCFG from hoisting the `ScalarPair(u8, u16)` field loads
-       above the bounds check before SROA + InstCombine can merge them into a
-       single `load i32, align 4`. Every Huffman lookup on 32-bit ARMv7 now
+       targets. In `load_huffman_code` on 32-bit targets, outlined
+       `load_huffman_code_into` (no `#[inline]`) using `clone_from_slice` on a
+       1-element `[HuffmanCode; 1]` slot so rustc's MIR inliner leaves `dst` as
+       a pointer parameter until LLVM's CGSCC pass folds the 4-byte `memcpy`
+       into a single `load i32, align 4` before SROA. Every Huffman lookup on 32-bit ARMv7 now
        compiles to a single `ldr.w Rd, [Rn, Rm, lsl #2]` followed by
        `uxtb`/`uxtab` (`bits`) and `lsr #16` (`value`) instead of 3 instructions
        (`ldrh.w` + `add.w` + `ldrb`), saving **85M–110M instructions** on
@@ -1097,6 +1097,117 @@ numbers with the exact command, machine, and commit SHAs.
     (debug and `--release` under `qemu-arm`) pass, `cargo test --release` x86-64
     passes, default-feature `cargo build --release` (`forbid(unsafe_code)`)
     passes, zero added `unsafe`. Pushed `perf` (`32e41d6`) to
+    `pmeenan/rust-brotli-decompressor` and updated submodule pointer.
+- **2026-11-01** - Review fixes, Huffman setup, and `SafeProcessCommands`
+  optimizations (`vendor/rust-brotli-decompressor:perf`, commit `afe3536`):
+  - **Review fixes landed (`afe3536`):**
+    1. **Re-check 28-byte fast-path margin after `DecodeCommandBlockSwitch`
+       (`src/decode.rs`):** Restored the 28-byte fast-path input margin check
+       after `DecodeCommandBlockSwitch` in `ProcessCommandsInternal` (`if !safe
+       && br.avail_in() < 28 { result = BROTLI_DECODER_NEEDS_MORE_INPUT; break;
+       }`) so consuming up to 54 bits for a command block switch cannot eat into
+       the 28-byte margin needed by the following command, distance block
+       switch, and distance. Using a direct `break` rather than `continue` to
+       the outer `while` header avoids a second loop backedge on x86-64 and
+       skips re-testing `state` and `block_length[1] == 0` on ARMv7 (`-1.6K` to
+       `-8.9K` instructions/decode vs `continue` on `bootstrap`).
+    2. **Underflow `debug_assert!`s (`src/bit_reader/mod.rs`):** Added
+       `debug_assert!(false, ...)` on the underflow branches of
+       `BrotliFastBitReader::fill` (64-bit and 32-bit) and
+       `BrotliFastBitReader::read_bits` (`n_bits > 16` second refill) so debug
+       and fuzz builds immediately catch any fast-path input guard violation.
+    3. **32-bit `BrotliReadConstantNBits` (`n` in `25..=32`) & docs
+       (`src/bit_reader/mod.rs`, `src/bit_reader/regression_tests.rs`):** Fixed
+       the high-half refill in 32-bit `BrotliReadConstantNBits` to call
+       `BrotliFillBitWindowCompileTimeNbits(br, 16, input)` instead of `8`,
+       documented and `debug_assert!`ed the 32-bit `n_bits <= 16` precondition on
+       `BrotliGetBits` / `BrotliGetConstantNBits`, and updated regression tests.
+    4. **Comment / doc cleanup:** Updated stale references to a "dummy volatile
+       read" in `load_huffman_code` (replaced by `load_huffman_code_into`) and
+       updated the `huffman_tree` comment in `src/decode.rs`.
+  - **Performance optimizations landed (`afe3536`):**
+    1. **Eliminated `__memcmpeq` (`bcmp`) in `BrotliBuildCodeLengthsHuffmanTable`
+       (`src/huffman/mod.rs`):** Replaced `actual_count[1..] !=
+       count[1..actual_count.len()]` with an XOR-fold loop (`count_diff |= *a ^
+       *c`), eliminating a libc `bcmp` call per Huffman tree.
+    2. **Added `replicate_value_pow2` (`src/huffman/mod.rs`):** Added
+       `replicate_value_pow2` (intentionally without `#[inline]` so LLVM's CGSCC
+       inliner coerces the 4-byte `HuffmanCode` ABI argument to `i32` before
+       inlining on 32-bit ARM, emitting a single `str.w` per table slot instead
+       of 3 byte/halfword stores) using two-step slicing
+       `table.get_mut(offset..)?.get_mut(..=last)` to skip per-symbol `step <= 0
+       || end <= 0` and power-of-two divisibility checks in
+       `BrotliBuildCodeLengthsHuffmanTable` and `BrotliBuildHuffmanTable`.
+    3. **Constant `SYMBOL_LISTS_OFFSET` & `BrotliFastBitReader` in
+       `ReadSymbolCodeLengths` (`src/decode.rs`):** Replaced the runtime
+       `s.symbol_lists_index` load (`16`) with `const SYMBOL_LISTS_OFFSET: usize
+       = 16` in `ProcessSingleCodeLength` and `ProcessRepeatedCodeLength`, used
+       `.get_mut(...)` instead of panicking `fast_mut!` on `symbol_lists`, and
+       used `BrotliFastBitReader` (`br.fill(17)`) in `ReadSymbolCodeLengths`.
+       Kept `s.symbol_lists_index` at the `BrotliBuildHuffmanTable` call site so
+       LLVM does not constant-propagate `16` and unroll the `max_length` scan
+       loop 16 times.
+    4. **`SafeProcessCommands` optimizations (`src/bit_reader/mod.rs`,
+       `src/decode.rs`):** Marked `BrotliGetAvailableBits`, `BrotliPullByte`
+       (using `input.get(br.next_in as usize)`), `BrotliSafeGetBits`,
+       `BrotliSafeReadBits`, and `SafeReadBits` `#[inline(always)]`, marked
+       `SafeDecodeSymbol` `#[cold]`, used `dist_context_map[(context & 3) as
+       usize]` in `ReadCommandInternal` (`safe == true`), removed dead `!safe`
+       branches in `ReadDistanceInternal` (`safe == true`), and skipped
+       `distance_root_table` updates in `ProcessCommandsInternal` when `safe ==
+       true`.
+  - **What was tried and reverted:**
+    - `#[inline(always)]` on `replicate_value_pow2` + passing constant `16` to
+      `BrotliBuildHuffmanTable` (`pbr33`): rustc's MIR inliner inlined
+      `replicate_value_pow2` before LLVM IR generation, splitting 32-bit
+      `HuffmanCode` writes into `strb` + `strb` + `strh` inside the inner fill
+      loops, and constant-propagating `16` into `BrotliBuildHuffmanTable`
+      unrolled its `max_length` loop (`+50K` instructions/decode on `bootstrap`
+      flushed `q5`).
+    - Making `fill_context_trees` conditional on `block_length[0] >= 32` in
+      `ProcessCommandsInternal` (`pbr31`, `pbr32`): prevented LLVM's
+      CorrelatedValuePropagation from proving `context_trees` is always `Some`
+      at the slow literal loop lookup in `ProcessCommands` (`!safe`), keeping
+      `_ => literal_huffman_tree(...)` alive and spilling `s` (`fp`) plus 50+
+      stack slots (`111 -> 163..179 [sp] refs`, `+60K..80K`
+      instructions/decode).
+  - **Measurements (`afe3536`, 144-cell benchmark CSVs in
+    `docs/baseline/bench-2026-11-01-*-pbr35.csv`):**
+    - **Android Cortex-A53 (`thumbv7neon`, `cpu2` @ 2.30 GHz, stable `rustc 1.99.1`):**
+      - `simpleperf stat` vs `32e41d6` (`pbr30`, Direct API): cuts **`27K`
+        instructions/decode** on `bootstrap` static `q5`, **`53K`** on
+        `bootstrap` static `q11`, **`61K`** on `bootstrap` flushed `q5`,
+        **`98K`** on `bootstrap` flushed `q11`, **`31K`** on `wiki-Brotli.html`
+        static `q5`, and **`85K`** on `wiki-Brotli.html` flushed `q5`.
+      - **Rust Direct vs C (144 cells):** **`+0.77%` faster than C overall**
+        (`-1.3%` static std, `+5.5%` static dict, `-0.8%` flushed std, `+3.5%`
+        flushed dict; **`+0.9%` static overall, `+0.6%` flushed overall**), up
+        from `-0.69%` overall (`-2.5% / +4.7% / -2.8% / +2.0%`) in `32e41d6`.
+      - **Rust FFI vs C (144 cells):** **`+1.16%` faster than C overall**
+        (`-1.0%` static std, `+6.1%` static dict, `-0.4%` flushed std, `+3.8%`
+        flushed dict; **`+1.3%` static overall, `+1.0%` flushed overall**), up
+        from `-1.80%` overall (`-3.7% / +3.4% / -3.7% / +0.9%`) in `32e41d6`
+        and `-31.1%` at baseline `2ed02ed`.
+    - **Linux i9-11900KF (@ 3.5 GHz, 144 cells, `hostlock exclusive` +
+      `tune_benchmark_host.py`):**
+      - **Rust Direct vs C:** **`+9.90%` faster than C overall** (`+7.5%`
+        static std, `+16.1%` static dict, `+8.2%` flushed std, `+12.2%` flushed
+        dict; `+10.3%` static overall, `+9.5%` flushed overall).
+      - **Rust FFI vs C:** **`+8.57%` faster than C overall** (`+6.2%` static
+        std, `+13.9%` static dict, `+7.3%` flushed std, `+10.7%` flushed dict;
+        `+8.7%` static overall, `+8.5%` flushed overall).
+    - **Apple M5 Max (`arm64`, 144 cells):**
+      - **Rust Direct vs C:** **`+23.17%` faster than C overall** (`+25.1%`
+        static std, `+20.3%` static dict, `+23.5%` flushed std, `+21.7%` flushed
+        dict; `+23.5%` static overall, `+22.9%` flushed overall).
+      - **Rust FFI vs C:** **`+17.38%` faster than C overall** (`+20.8%` static
+        std, `+17.1%` static dict, `+15.6%` flushed std, `+14.6%` flushed dict;
+        `+19.6%` static overall, `+15.2%` flushed overall).
+  - **Gates:** `--verify` 600/600 decode parity (440/600 exact) in Direct and
+    FFI modes, dict-span repro 4/4 pass, `scripts/test_armv7.sh` (debug and
+    `--release` under `qemu-arm`) pass, Android hardware `--verify --quality 5`
+    50/50 pass (Direct and FFI), `cargo test --release` x86-64 passes, zero
+    added `unsafe`. Pushed `perf` (`afe3536`) to
     `pmeenan/rust-brotli-decompressor` and updated submodule pointer.
 
 ## Maintaining documentation

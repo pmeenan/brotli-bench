@@ -391,10 +391,10 @@ check.
   `c/brotli/decode.h`) on `#[cfg(not(target_pointer_width = "64"))]` to
   `{ pub bits: u8, pad: u8, pub value: u16 }` (`#[repr(C, align(4))]`), matching
   C's `BROTLI_HUFFMAN_CODE_FAST_LOAD` layout while keeping `{ pub value: u16,
-  pub bits: u8 }` on 64-bit targets, and prevented SimplifyCFG from hoisting the
-  `ScalarPair(u8, u16)` field loads above the bounds check in
-  `load_huffman_code` before SROA + InstCombine merge them into a single `load
-  i32, align 4`. Every Huffman lookup on 32-bit ARMv7 now compiles to a single
+  pub bits: u8 }` on 64-bit targets, and outlined `load_huffman_code_into` (no
+  `#[inline]`) using `clone_from_slice` in `load_huffman_code` so LLVM's CGSCC
+  pass folds the 4-byte `memcpy` into a single `load i32, align 4` before SROA.
+  Every Huffman lookup on 32-bit ARMv7 now compiles to a single
   `ldr.w Rd, [Rn, Rm, lsl #2]` followed by `uxtb`/`uxtab` (`bits`) and `lsr #16`
   (`value`) instead of 3 instructions (`ldrh.w` + `add.w` + `ldrb`), saving
   **85M–110M instructions** on `wiki-Brotli.html` and `bootstrap-5.3.3.min.css`.
@@ -449,12 +449,58 @@ check.
   -6.0%`), from `-7.5%` vs C to **`-0.7%` vs C** on `linux` i9-11900KF, and
   reaching **`+18.0%` vs C** (`+15.4%` static overall) on `mac` M5 Max.
 
+**Landed (`afe3536`):**
+- **Review hardening:** restored the 28-byte fast-path margin re-check (`if !safe
+  && br.avail_in() < 28 { result = BROTLI_DECODER_NEEDS_MORE_INPUT; break; }`)
+  after `DecodeCommandBlockSwitch` in `ProcessCommandsInternal`, added
+  `debug_assert!(false, ...)` on underflow in `BrotliFastBitReader::fill` and
+  `BrotliFastBitReader::read_bits`, and fixed 32-bit `BrotliReadConstantNBits`
+  for `n` in `25..=32` (`BrotliFillBitWindowCompileTimeNbits(br, 16, input)`).
+- **Huffman setup (`src/huffman/mod.rs`, `src/decode.rs`):** replaced
+  `actual_count[1..] != count[1..]` in `BrotliBuildCodeLengthsHuffmanTable` with
+  an XOR-fold loop (eliminating the per-tree `__memcmpeq`/`bcmp` call), added
+  `replicate_value_pow2` (without `#[inline]` so LLVM's CGSCC pass coerces the
+  4-byte `HuffmanCode` ABI argument to `i32` before inlining on 32-bit ARM,
+  emitting a single `str.w` per table slot) using two-step
+  `table.get_mut(offset..)?.get_mut(..=last)` slicing, replaced the runtime
+  `s.symbol_lists_index` load with `SYMBOL_LISTS_OFFSET` (`16`) and `.get_mut` in
+  `ProcessSingleCodeLength` / `ProcessRepeatedCodeLength`, and used
+  `BrotliFastBitReader` (`br.fill(17)`) in `ReadSymbolCodeLengths`.
+- **`SafeProcessCommands` (`src/bit_reader/mod.rs`, `src/decode.rs`):** marked
+  `BrotliGetAvailableBits`, `BrotliPullByte` (via `input.get`),
+  `BrotliSafeGetBits`, `BrotliSafeReadBits`, and `SafeReadBits`
+  `#[inline(always)]`, marked `SafeDecodeSymbol` `#[cold]`, used cached
+  `dist_context_map[(context & 3) as usize]` in `ReadCommandInternal` (`safe`),
+  removed dead `!safe` branches in `ReadDistanceInternal` (`safe`), and skipped
+  `distance_root_table` updates when `safe == true`.
+- Cuts another **`27K–98K` instructions/decode** across `bootstrap` and
+  `wiki-Brotli.html` (`static` and `flushed`, `q5` and `q11`) on Cortex-A53,
+  bringing **all three benchmark platforms ahead of C overall across all 144
+  cells** (`docs/baseline/bench-2026-11-01-*-pbr35.csv`):
+  - **Android Cortex-A53 (`armv7l`, Thumb-2 + NEON):**
+    - **Rust Direct vs C:** **`+0.77%` overall** (`-1.3%` static std, `+5.5%`
+      static dict, `-0.8%` flushed std, `+3.5%` flushed dict; **`+0.9%` static
+      overall, `+0.6%` flushed overall**).
+    - **Rust FFI vs C:** **`+1.16%` overall** (`-1.0%` static std, `+6.1%` static
+      dict, `-0.4%` flushed std, `+3.8%` flushed dict; **`+1.3%` static overall,
+      `+1.0%` flushed overall**).
+  - **Linux i9-11900KF (@ 3.5 GHz, `x86_64`):**
+    - **Rust Direct vs C:** **`+9.90%` overall** (`+7.5%` static std, `+16.1%`
+      static dict, `+8.2%` flushed std, `+12.2%` flushed dict).
+    - **Rust FFI vs C:** **`+8.57%` overall** (`+6.2%` static std, `+13.9%`
+      static dict, `+7.3%` flushed std, `+10.7%` flushed dict).
+  - **Apple M5 Max (`aarch64`):**
+    - **Rust Direct vs C:** **`+23.17%` overall** (`+25.1%` static std, `+20.3%`
+      static dict, `+23.5%` flushed std, `+21.7%` flushed dict).
+    - **Rust FFI vs C:** **`+17.38%` overall** (`+20.8%` static std, `+17.1%`
+      static dict, `+15.6%` flushed std, `+14.6%` flushed dict).
+
 ## Deliverables and upstreaming
 
 - Small, self-contained commits on `rust-brotli-decompressor:perf`, each
   with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`,
   `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`, `d536284`, `03ac41a`,
-  `d889cc0`, `32e41d6`).
+  `d889cc0`, `32e41d6`, `afe3536`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.

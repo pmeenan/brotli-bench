@@ -4,17 +4,18 @@ These are ideas for closing the remaining gap between the safe Rust decoder and 
 
 ## Where things stand
 
-- Fork: `vendor/rust-brotli-decompressor` `perf` at `32e41d6`.
+- Fork: `vendor/rust-brotli-decompressor` `perf` at `afe3536`.
 - Android Cortex-A53, Thumb-2 + NEON on both sides, 144 cells (stable `rustc 1.99.1`):
   - Before `45d09e0` (`6082a30`): Direct -14.7% overall (-18.0% / -11.3% / -15.4% / -10.5% static std / static dict / flushed std / flushed dict); FFI (`05ee043`) -21.5% / -15.8% / -19.6% / -15.1%;
   - After `45d09e0`: Direct -10.3% overall (-13.0% / -5.3% / -12.0% / -6.1%);
   - After `d536284`: Direct -4.2% overall (-6.4% / +0.4% / -5.5% / -1.6%); FFI -7.0% / -0.3% / -6.0% / -1.6%;
-  - After `03ac41a` + `d889cc0` + `32e41d6`:
-    - **Rust Direct vs C: `-0.7%` overall (`-2.5%` static std, `+4.7%` static dict, `-2.8%` flushed std, `+2.0%` flushed dict)** — **+4.2% / +4.3% / +2.9% / +3.7% faster than `d536284`**, **+10.7% faster than `45d09e0`**, and **+21.3% faster than `05ee043`**, with `bootstrap-5.3.3.min.css` static `q11` improved from `-13.9%` (`d889cc0`) to **`-8.3%` vs C** (`-136.7K` instructions/decode);
-    - **Rust FFI vs C: `-1.8%` overall (`-3.7%` static std, `+3.4%` static dict, `-3.7%` flushed std, `+0.9%` flushed dict)**;
-    - **Dictionary decode beats C on 32-bit ARMv7 in both static (`+4.7%` Direct, `+3.4%` FFI) and flushed (`+2.0%` Direct, `+0.9%` FFI) modes.**
-- On `wiki-Brotli.html` q5 static (500 iterations, stable `rustc 1.99.1`), `03ac41a` + `d889cc0` cuts Rust Direct instructions from `1,890.1M` (`6082a30`) -> `1,744.8M` (`45d09e0`) -> `1,639.5M` (`d536284`) -> **`1,598.7M` (within 3.7% of C's `1,541.4M`, `157.8 MiB/s` vs C's `163.2 MiB/s`)**; on `bootstrap-5.3.3.min.css` q6 static (500 iterations), from `1,426.3M` (`d536284`) -> **`1,341.7M` (-84.6M, within 2.8% of C's `1,304.9M`, `221.3 MiB/s` vs C's `224.2 MiB/s`)**; and on `wiki-Brotli.html` q11 static (500 iterations), from `5,571.6M` / `46.99M` branch misses -> **`5,458.1M` instructions / `45.47M` branch misses (-113.5M instructions, -1.53M branch misses matching C's `45.16M`, `144.3 MiB/s`, +5.8% faster than `pbr22`)**.
-- The remaining `-2.5%` to `-2.8%` non-dictionary gap on 32-bit ARMv7 matches the ~2.5–3% cost of **ring buffer zero-initialization (`calloc`/`memset`)**: safe Rust must zero-initialize the ring buffer slice before forming `&mut [u8]`, whereas C calls `malloc`.
+  - After `03ac41a` + `d889cc0` + `32e41d6`: Direct -0.7% overall (-2.5% / +4.7% / -2.8% / +2.0%); FFI -1.8% overall (-3.7% / +3.4% / -3.7% / +0.9%);
+  - After `afe3536` (`docs/baseline/bench-2026-11-01-android-neon-*-pbr35.csv`):
+    - **Rust Direct vs C: `+0.77%` faster than C overall (`-1.3%` static std, `+5.5%` static dict, `-0.8%` flushed std, `+3.5%` flushed dict; `+0.9%` static overall, `+0.6%` flushed overall)** — **+22.8% faster than `05ee043`**;
+    - **Rust FFI vs C: `+1.16%` faster than C overall (`-1.0%` static std, `+6.1%` static dict, `-0.4%` flushed std, `+3.8%` flushed dict; `+1.3%` static overall, `+1.0%` flushed overall)** — up from `-31.1%` at baseline `2ed02ed`;
+    - **Safe Rust now beats C overall on 32-bit ARMv7 in both Direct (`+0.77%`) and FFI (`+1.16%`) modes, and in both static (`+0.9%` / `+1.3%`) and flushed (`+0.6%` / `+1.0%`) modes.**
+- On `wiki-Brotli.html` q5 static (500 iterations, stable `rustc 1.99.1`), `03ac41a` + `d889cc0` + `afe3536` cuts Rust Direct instructions from `1,890.1M` (`6082a30`) -> `1,744.8M` (`45d09e0`) -> `1,639.5M` (`d536284`) -> `1,598.7M` (`d889cc0`) -> **`1,583.3M` (within 2.7% of C's `1,541.4M`)**; on `bootstrap-5.3.3.min.css`, `afe3536` cuts another `27K–98K` instructions/decode across `static` and `flushed` `q5`/`q11` (`bootstrap` static overall `-7.7% -> -5.7%`, flushed overall `-4.8% -> -3.1%`).
+- The remaining `-0.4%` to `-1.3%` non-dictionary gap on 32-bit ARMv7 is less than half of the ~2.5–3% cost of **ring buffer zero-initialization (`calloc`/`memset`)**: safe Rust must zero-initialize the ring buffer slice before forming `&mut [u8]`, whereas C calls `malloc`.
 
 ## Tooling (all on the dev VM; the device hangs off `linux` via adb)
 
@@ -65,9 +66,10 @@ Restored C's 32-bit `n_bits <= 8` refill path in `BrotliFillBitWindowCompileTime
 - **FFI double zero-fill fixed (`d536284`)**: previously, inlining `try_alloc_default_slice` into `SubclassableAllocator::alloc_cell` caused SimplifyCFG on 32-bit ARM to tail-merge `try_alloc_default_slice`'s zero-fill loop with the custom `alloc_func` branch's zero-fill loop before LoopIdiomRecognize + InstCombine could fold `alloc_zeroed` + `memset` into `calloc`, causing the default FFI allocator to call `__rust_alloc_zeroed` (`calloc`) and then call `memset` on every ringbuffer and Huffman table allocation. Marking `try_alloc_default_slice` `#[inline(never)]` folds it to a single `__calloc` call (-76.5M instructions on `wiki-Brotli.html` q5 static FFI, bringing FFI within ~0.5% of Direct on Android).
 - Remaining single zero-fill (~3% on static streams): safe Rust must zero the ring buffer once; C mallocs it. The harness's Android binaries are static glibc, not bionic, so allocator behavior there isn't the device's.
 
-### 6. Huffman table building — **LANDED (`d536284`)**
+### 6. Huffman table building & `SafeProcessCommands` — **LANDED (`d536284`, `afe3536`)**
 
-- Rewrote `ReplicateValue` to step forward (`while let Some(slot) = slice.get_mut(pos) { *slot = code; pos += step_u; }`) and changed `NextTableBitSize` `left` from `i64` to `i32`, eliminating 64-bit arithmetic and per-iteration panic bounds checks in `BrotliBuildHuffmanTable` on 32-bit ARM (-22.1M instructions on `wiki-Brotli.html` q5 static).
+- Rewrote `ReplicateValue` to step forward (`while let Some(slot) = slice.get_mut(pos) { *slot = code; pos += step_u; }`) and changed `NextTableBitSize` `left` from `i64` to `i32`, eliminating 64-bit arithmetic and per-iteration panic bounds checks in `BrotliBuildHuffmanTable` on 32-bit ARM (-22.1M instructions on `wiki-Brotli.html` q5 static) (`d536284`).
+- Replaced `actual_count[1..] != count[1..]` in `BrotliBuildCodeLengthsHuffmanTable` with an XOR-fold loop to eliminate the per-tree `__memcmpeq` (`bcmp`) call, added `replicate_value_pow2` (without `#[inline]` so LLVM's CGSCC pass coerces the 4-byte `HuffmanCode` argument to `i32` before inlining on 32-bit ARM, emitting a single `str.w` per table slot) using two-step `table.get_mut(offset..)?.get_mut(..=last)` slicing, replaced the runtime `s.symbol_lists_index` load with `SYMBOL_LISTS_OFFSET` (`16`) and `.get_mut` in `ProcessSingleCodeLength` / `ProcessRepeatedCodeLength`, used `BrotliFastBitReader` (`br.fill(17)`) in `ReadSymbolCodeLengths`, and optimized `SafeProcessCommands` (`#[inline(always)]` safe bit-reader helpers, `#[cold]` `SafeDecodeSymbol`, cached `dist_context_map`, dead `!safe` branch removal in `ReadDistanceInternal`, and skipping `distance_root_table` updates when `safe == true`) (`afe3536`, `-27K` to `-98K` instructions/decode on `bootstrap` and `wiki-Brotli.html`).
 
 ### 7. Branch misses & distance decode — **LANDED (`d889cc0`)**
 
@@ -75,7 +77,7 @@ Restored C's 32-bit `n_bits <= 8` refill path in `BrotliFillBitWindowCompileTime
 
 ### 8. `HuffmanCode` layout (`BROTLI_HUFFMAN_CODE_FAST_LOAD`) — **LANDED (`03ac41a`)**
 
-- Reordered `pub struct HuffmanCode` in `src/huffman/mod.rs` (and `HuffmanCodeStruct` in `c/brotli/decode.h`) on `#[cfg(not(target_pointer_width = "64"))]` to `{ pub bits: u8, pad: u8, pub value: u16 }` (`#[repr(C, align(4))]`), matching C's `BROTLI_HUFFMAN_CODE_FAST_LOAD` layout while keeping `{ pub value: u16, pub bits: u8 }` on 64-bit targets. In `load_huffman_code` on 32-bit targets, added a dummy volatile read on the unreachable `None` fallback arm so SimplifyCFG does not hoist the `ScalarPair(u8, u16)` loads above the bounds check before SROA + InstCombine merge them into a single `load i32, align 4`. Every Huffman lookup on 32-bit ARMv7 now compiles to a single `ldr.w Rd, [Rn, Rm, lsl #2]` followed by `uxtb`/`uxtab` (`bits`) and `lsr #16` (`value`), saving **85M–110M instructions** on `wiki-Brotli.html` and `bootstrap-5.3.3.min.css` on Cortex-A53 without any `unsafe` or API breakage.
+- Reordered `pub struct HuffmanCode` in `src/huffman/mod.rs` (and `HuffmanCodeStruct` in `c/brotli/decode.h`) on `#[cfg(not(target_pointer_width = "64"))]` to `{ pub bits: u8, pad: u8, pub value: u16 }` (`#[repr(C, align(4))]`), matching C's `BROTLI_HUFFMAN_CODE_FAST_LOAD` layout while keeping `{ pub value: u16, pub bits: u8 }` on 64-bit targets. In `load_huffman_code` on 32-bit targets, outlined `load_huffman_code_into` (no `#[inline]`) using `clone_from_slice` on a 1-element `[HuffmanCode; 1]` slot so rustc's MIR inliner leaves `dst` as a pointer parameter until LLVM's CGSCC pass folds the 4-byte `memcpy` into a single `load i32, align 4` before SROA. Every Huffman lookup on 32-bit ARMv7 now compiles to a single `ldr.w Rd, [Rn, Rm, lsl #2]` followed by `uxtb`/`uxtab` (`bits`) and `lsr #16` (`value`), saving **85M–110M instructions** on `wiki-Brotli.html` and `bootstrap-5.3.3.min.css` on Cortex-A53 without any `unsafe` or API breakage.
 
 ## Not worth retrying
 
