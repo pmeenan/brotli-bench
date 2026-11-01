@@ -4,17 +4,17 @@ These are ideas for closing the remaining gap between the safe Rust decoder and 
 
 ## Where things stand
 
-- Fork: `vendor/rust-brotli-decompressor` `perf` at `d536284`.
+- Fork: `vendor/rust-brotli-decompressor` `perf` at `d889cc0`.
 - Android Cortex-A53, Thumb-2 + NEON on both sides, 144 cells (stable `rustc 1.99.1`):
   - Before `45d09e0` (`6082a30`): Direct -14.7% overall (-18.0% / -11.3% / -15.4% / -10.5% static std / static dict / flushed std / flushed dict); FFI (`05ee043`) -21.5% / -15.8% / -19.6% / -15.1%;
   - After `45d09e0`: Direct -10.3% overall (-13.0% / -5.3% / -12.0% / -6.1%);
-  - After `d536284`:
-    - **Rust Direct vs C: `-4.2%` overall (`-6.4%` static std, `+0.4%` static dict, `-5.5%` flushed std, `-1.6%` flushed dict)** — **+7.8% / +6.5% / +7.5% / +6.0% faster than `45d09e0`** and **+14.1% faster than `05ee043`**;
-    - **Rust FFI vs C: `-7.0%` static std, `-0.3%` static dict, `-6.0%` flushed std, `-1.6%` flushed dict** (within ~0.5% of Direct).
-- On `wiki-Brotli.html` q5 static (1000 iterations, stable `rustc 1.99.1`), `d536284` cuts Rust Direct instructions from `3,780.3M` (`6082a30`) -> `3,489.6M` (`45d09e0`) -> **`3,279.0M` (-500.3M total, within 6.4% of C's `3,082.8M`, `154.7 MiB/s` Direct / `155.4 MiB/s` FFI vs C's `162.3 MiB/s`)**, and on `jquery-3.7.1.min.js` q5 static from `2,818.9M` (`6082a30`) -> `2,585.8M` (`45d09e0`) -> **`2,439.5M` (-379.4M total, within 2.2% of C's `2,386.1M` instructions, `81.8 MiB/s` vs C's `84.8 MiB/s`)**. On `dict:jquery` q5 static, Rust Direct is `848.6M` instructions (`222.6 MiB/s`, **+8.9% faster than C's `919.3M` / `204.5 MiB/s`**).
-- The remaining `-5.5%` to `-6.4%` non-dictionary gap on 32-bit ARMv7 is smaller than the combined ~7% cost of:
-  - **3-instruction Huffman table loads (`ldrh.w` + `add.w` + `ldrb`) vs C's 1-instruction `ldr` (`BROTLI_HUFFMAN_CODE_FAST_LOAD`, ~4% of instructions)**: in `vendor/brotli-c/c/dec/huffman.h`, C defines `BROTLI_HUFFMAN_CODE_FAST_LOAD` on `ARMV7` / `ARMV8_32`, changing `HuffmanCode` from `struct { uint8_t bits; uint16_t value; }` to `typedef uint32_t HuffmanCode` (`(value << 16) | bits`). In Rust, `pub struct HuffmanCode { pub value: u16, pub bits: u8 }` is part of the public `AllocHC: Allocator<HuffmanCode>` trait bound, and `rustc` gives any 2-field struct `BackendRepr::ScalarPair(u16, u8)`, emitting separate `i16` and `i8` loads in LLVM IR even with `#[repr(C, align(4))]`. Because Thumb-2 `ldrb` has no scaled-index + displacement addressing mode, every Huffman lookup in Rust emits 3 instructions (`ldrh.w` + `add.w` + `ldrb`) vs 1 `ldr` in C (~120M–150M instructions across `wiki-Brotli.html` q5 static).
-  - **Ring buffer zero-initialization (`calloc`/`memset`, ~3% of instructions)**: safe Rust must zero-initialize the ring buffer slice before forming `&mut [u8]`, whereas C calls `malloc`.
+  - After `d536284`: Direct -4.2% overall (-6.4% / +0.4% / -5.5% / -1.6%); FFI -7.0% / -0.3% / -6.0% / -1.6%;
+  - After `03ac41a` + `d889cc0` (`pbr27`):
+    - **Rust Direct vs C: `-0.7%` overall (`-2.5%` static std, `+4.7%` static dict, `-2.8%` flushed std, `+2.0%` flushed dict)** — **+4.2% / +4.3% / +2.9% / +3.7% faster than `d536284`**, **+10.7% faster than `45d09e0`**, and **+21.3% faster than `05ee043`**;
+    - **Rust FFI vs C: `-1.8%` overall (`-3.7%` static std, `+3.4%` static dict, `-3.7%` flushed std, `+0.9%` flushed dict)**;
+    - **Dictionary decode beats C on 32-bit ARMv7 in both static (`+4.7%` Direct, `+3.4%` FFI) and flushed (`+2.0%` Direct, `+0.9%` FFI) modes.**
+- On `wiki-Brotli.html` q5 static (500 iterations, stable `rustc 1.99.1`), `03ac41a` + `d889cc0` cuts Rust Direct instructions from `1,890.1M` (`6082a30`) -> `1,744.8M` (`45d09e0`) -> `1,639.5M` (`d536284`) -> **`1,598.7M` (within 3.7% of C's `1,541.4M`, `157.8 MiB/s` vs C's `163.2 MiB/s`)**; on `bootstrap-5.3.3.min.css` q6 static (500 iterations), from `1,426.3M` (`d536284`) -> **`1,341.7M` (-84.6M, within 2.8% of C's `1,304.9M`, `221.3 MiB/s` vs C's `224.2 MiB/s`)**; and on `wiki-Brotli.html` q11 static (500 iterations), from `5,571.6M` / `46.99M` branch misses -> **`5,458.1M` instructions / `45.47M` branch misses (-113.5M instructions, -1.53M branch misses matching C's `45.16M`, `144.3 MiB/s`, +5.8% faster than `pbr22`)**.
+- The remaining `-2.5%` to `-2.8%` non-dictionary gap on 32-bit ARMv7 matches the ~2.5–3% cost of **ring buffer zero-initialization (`calloc`/`memset`)**: safe Rust must zero-initialize the ring buffer slice before forming `&mut [u8]`, whereas C calls `malloc`.
 
 ## Tooling (all on the dev VM; the device hangs off `linux` via adb)
 
@@ -51,9 +51,9 @@ Before committing, run the per-commit gates in [development.md](development.md).
 - **`dist_context_map[slice_index + distance_context]`** — **LANDED (`45d09e0`)**: added `load_dist_context_map -> [u8; 4]` cached in `ProcessCommandsInternal` and updated on `DecodeDistanceBlockSwitch`, indexed with `distance_context & 3`.
 - **`context_trees` check in non-trivial literal loop** — **LANDED (`45d09e0`)**: simplified `context_trees` from `Option<([&LiteralTree; 64], usize)>` to `Option<[&LiteralTree; 64]>` invalidated on `DecodeLiteralBlockSwitch`.
 
-### 3. 24-bit refill for `n_bits <= 8` on 32-bit
+### 3. 24-bit refill for `n_bits <= 8` on 32-bit — **LANDED (`d889cc0`)**
 
-C refills 3 bytes when `bit_pos <= 8` for small peeks (`PreloadSymbol`, 8-bit `GetBits`). Rust dropped that path in `0466359` / `05ee043` and always refills 16 bits. Restoring it in the fast reader means fewer refills in the literal peek path. Measure; the literal loop is already cheaper than C's, so the gain may be small.
+Restored C's 32-bit `n_bits <= 8` refill path in `BrotliFillBitWindowCompileTimeNbits` and `BrotliFastBitReader::fill`: when `n_bits <= 8` and `bit_pos_ >= 24`, shift `val_ >>= 24`, mask `bit_pos_ &= 7` (proving `bit_pos_ < 32` across both arms so LLVM elides the `and Rs, Rs, #31` shift-count mask on ARMv7), and load 3 bytes at once via a 32-bit unaligned load (`u32::from_le_bytes << 8`). Also marked the `n_bits > 16` split-read branch `#[cold]` via `cold_bit_reader_path()` in `BrotliReadBits` and `BrotliFastBitReader::read_bits`.
 
 ### 4. Copy path — **LANDED (`45d09e0`, `d536284`)**
 
@@ -69,16 +69,23 @@ C refills 3 bytes when `bit_pos <= 8` for small peeks (`PreloadSymbol`, 8-bit `G
 
 - Rewrote `ReplicateValue` to step forward (`while let Some(slot) = slice.get_mut(pos) { *slot = code; pos += step_u; }`) and changed `NextTableBitSize` `left` from `i64` to `i32`, eliminating 64-bit arithmetic and per-iteration panic bounds checks in `BrotliBuildHuffmanTable` on 32-bit ARM (-22.1M instructions on `wiki-Brotli.html` q5 static).
 
-### 7. Branch misses
+### 7. Branch misses & distance decode — **LANDED (`d889cc0`)**
 
-Rust has 49.9M branch misses vs C's 42.9M (+16%) on wiki q5 static. At about 8 cycles each that's roughly 56M cycles, about 9% of the cycle gap. The A53's branch-miss sampling skids too much to localize them; try comparing the code structure around the literal and command loop exits and `mark_unlikely()` placement.
+- In `ReadDistanceInternal` (`!safe`), added a fast path for the metablock-invariant `(s.distance_postfix_bits | (s.num_direct_distance_codes ^ 16)) == 0` case (`q0..q9`, -4.65M instructions on `bootstrap-5.3.3.min.css` q6 on Cortex-A53), and replaced the unpredictable `if distval >= 0` branch at `q10..q11` (`ndirect > 0 || npostfix > 0`) with a branchless `mask = !(distval >> 31) as u32` calculation (`nbits == 0` when `distval < 0`), eliminating **1.53M branch misses** on `wiki-Brotli.html` q11 on Cortex-A53 (`46.99M -> 45.47M`, matching C's `45.16M`, and boosting `wiki-Brotli.html` q11 decode throughput by **+5.8%**).
 
-### 8. `HuffmanCode` layout (`BROTLI_HUFFMAN_CODE_FAST_LOAD`)
+### 8. `HuffmanCode` layout (`BROTLI_HUFFMAN_CODE_FAST_LOAD`) — **LANDED (`03ac41a`)**
 
-In `vendor/brotli-c/c/dec/huffman.h`, C defines `BROTLI_HUFFMAN_CODE_FAST_LOAD` on `ARMV7` / `ARMV8_32`, changing `HuffmanCode` from `struct { uint8_t bits; uint16_t value; }` to `typedef uint32_t HuffmanCode` (`(value << 16) | bits`) so a table entry loads in one `ldr` instruction. In Rust, `pub struct HuffmanCode { pub value: u16, pub bits: u8 }` is part of the public API (`AllocHC: Allocator<HuffmanCode>`), and `rustc` gives any 2-field struct `BackendRepr::ScalarPair(u16, u8)`, emitting separate `load i16` and `load i8` instructions in LLVM IR even with `#[repr(C, align(4))]`. Because Thumb-2 `ldrb` has no scaled-index + displacement addressing mode (`[base, idx, lsl #2] + 2`), every Huffman lookup in Rust emits 3 instructions (`ldrh.w` + `add.w` + `ldrb`) vs 1 `ldr` in C (~120M–150M instructions on `wiki-Brotli.html` q5 static). Fixing this without `unsafe` would require a single-field `pub struct HuffmanCode(pub u32)` representation (an API-breaking change to `HuffmanCode` field access).
+- Reordered `pub struct HuffmanCode` in `src/huffman/mod.rs` (and `HuffmanCodeStruct` in `c/brotli/decode.h`) on `#[cfg(not(target_pointer_width = "64"))]` to `{ pub bits: u8, pad: u8, pub value: u16 }` (`#[repr(C, align(4))]`), matching C's `BROTLI_HUFFMAN_CODE_FAST_LOAD` layout while keeping `{ pub value: u16, pub bits: u8 }` on 64-bit targets. In `load_huffman_code` on 32-bit targets, added a dummy volatile read on the unreachable `None` fallback arm so SimplifyCFG does not hoist the `ScalarPair(u8, u16)` loads above the bounds check before SROA + InstCombine merge them into a single `load i32, align 4`. Every Huffman lookup on 32-bit ARMv7 now compiles to a single `ldr.w Rd, [Rn, Rm, lsl #2]` followed by `uxtb`/`uxtab` (`bits`) and `lsr #16` (`value`), saving **85M–110M instructions** on `wiki-Brotli.html` and `bootstrap-5.3.3.min.css` on Cortex-A53 without any `unsafe` or API breakage.
 
 ## Not worth retrying
 
+- `HuffmanCode { bits, value }` layout on 64-bit targets (`pbr10`): regresses x86-64 by ~1.5% and `aarch64` Direct by ~2%. Keep `{ value, bits }` on 64-bit targets.
+- Precomputing `dist_extra_bits: [u8; 544]` + `dist_offset: [u32; 544]` in `BrotliState` (`CalculateDistanceLut`, `pbr24`): adds 2,720 bytes to `BrotliState`, pushing field offsets past Thumb-2's 12-bit immediate limit (`imm12 <= 4095`), forcing a second base register, spilling `s` and `br.rem`, and zeroing 2,720 extra bytes per stream (-2.4% on Android).
+- Manual `#[repr(C)]` field ordering on `BrotliState` (`pbr25`): `repr(Rust)` already places all hot fields at offsets `< 3200` (`< 4095`) and 8-byte aligns the `HuffmanTreeGroup`s; `#[repr(C)]` perturbs alignment and spills `s` and `s.pos` (-1.1% on Android).
+- `#[repr(C, align(8))]` on `PrefixCodeRange` (`kCmdLut`, `pbr20`): 8-byte `ldrd` requires even/odd register pairs on Thumb-2, increasing register spills in `ReadCommandInternal` (-2.2% on Android).
+- Special-casing `n_bits == 0` in `BrotliFastBitReader::read_bits` (`pbr21`): adds a branch per command/distance (+11.2M instructions on `bootstrap` q6).
+- Branchless `CopyOneByte` before `memmove16` for `i == 17` (`pbr16`), 8-byte NEON chunk loop in `memcpy_within_slice` (`pbr17`), or splitting overlapping back-references by `distance_code == 1` / `< 16` (`pbr18`): adds branches/code size in `ProcessCommandsInternal` (-1.3% to -2.3% on Android).
+- Removing `#[inline(never)]` from the 4 Huffman tree-view helpers on `x86_64` (`pbr19`): regresses `linux` x86-64 by -1.2% to -2.2% due to LICM slice spills.
 - A local `BrotliBitReader` copy inside the fast literal loops: no change.
 - A per-call fast reader (idea 1 without persistence): +17% instructions.
 - Returning `CmdLutElement` by value from `load_cmd_lut` (`pbr3`): SROA splits `v` into 6 scalar `phi` registers across `br.read_bits`, spilling `sl`, `r9`, and `ip` (+108M instructions vs returning `&'static CmdLutElement` in `pbr5`).

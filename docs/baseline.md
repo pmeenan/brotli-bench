@@ -728,3 +728,37 @@ default benchmark subset across all three platforms:
 - `wiki-Brotli.html`: C `3,082.8M` instructions (`162.3 MiB/s`); Rust `45d09e0` Direct `3,489.6M` (`140.0 MiB/s`) -> **Rust `d536284` Direct `3,279.0M` instructions (-210.6M vs `45d09e0`, -500.3M vs `6082a30`, `154.7 MiB/s`)**; **Rust `d536284` FFI `3,284.8M` instructions (-76.5M from `#[inline(never)]` on `try_alloc_default_slice`, `155.4 MiB/s`)**.
 - `jquery-3.7.1.min.js`: C `2,386.1M` instructions (`84.8 MiB/s`); Rust `45d09e0` Direct `2,585.8M` (`74.9 MiB/s`) -> **Rust `d536284` Direct `2,439.5M` instructions (-146.3M vs `45d09e0`, within 2.2% of C's instructions, `81.8 MiB/s`)**.
 - `dict:jquery`: C `919.3M` instructions (`204.5 MiB/s`); **Rust `d536284` Direct `848.6M` instructions (`222.6 MiB/s`, +8.9% faster than C)**.
+
+## 32-bit single-`ldr` `HuffmanCode` layout, 24-bit `n_bits <= 8` refills & branchless distance decode: `03ac41a` + `d889cc0` (2026-11-01)
+
+Measured after `vendor/rust-brotli-decompressor:perf` commits `03ac41a` and
+`d889cc0` (32-bit `{ bits, pad, value }` `HuffmanCode` layout + single-`ldr`
+`load_huffman_code`, 32-bit 24-bit refill when `n_bits <= 8` with `bit_pos_ &=
+7` + `#[cold]` `n_bits > 16` split read, metablock-invariant `npostfix == 0 &&
+ndirect == 0` distance fast path at `q0..q9` + branchless `mask = !(distval >>
+31) as u32` distance calculation at `q10..q11`, and `BrotliFastBitReader` /
+`ProcessCommandsInternal` live-variable reductions) on the 144-cell default
+benchmark subset across all three platforms:
+
+| Artifact | Platform & Config |
+| --- | --- |
+| [baseline/bench-2026-10-31-android-neon-direct-pbr27.csv](baseline/bench-2026-10-31-android-neon-direct-pbr27.csv) | Android (Cortex-A53 @ 2.30 GHz `cpu2`, Thumb-2 + NEON), `perf` (`d889cc0`), Direct Rust API |
+| [baseline/bench-2026-10-31-android-neon-ffi-pbr27.csv](baseline/bench-2026-10-31-android-neon-ffi-pbr27.csv) | Android (Cortex-A53 @ 2.30 GHz `cpu2`, Thumb-2 + NEON), `perf` (`d889cc0`), C FFI |
+| [baseline/bench-2026-10-31-linux-native-direct-pbr27.csv](baseline/bench-2026-10-31-linux-native-direct-pbr27.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`d889cc0`), Direct Rust API |
+| [baseline/bench-2026-10-31-linux-native-ffi-pbr27.csv](baseline/bench-2026-10-31-linux-native-ffi-pbr27.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`d889cc0`), C FFI |
+| [baseline/bench-2026-10-31-mac-m5max-direct-pbr27.csv](baseline/bench-2026-10-31-mac-m5max-direct-pbr27.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`d889cc0`), Direct Rust API |
+| [baseline/bench-2026-10-31-mac-m5max-ffi-pbr27.csv](baseline/bench-2026-10-31-mac-m5max-ffi-pbr27.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`d889cc0`), C FFI |
+
+| Platform & Config (144 cells, `d889cc0`) | `static standard` vs C (vs `d536284`) | `static dictionary` vs C (vs `d536284`) | `flushed standard` vs C (vs `d536284`) | `flushed dictionary` vs C (vs `d536284`) |
+| --- | --- | --- | --- | --- |
+| **Android Cortex-A53 (`thumbv7neon`, Direct)** | **-2.5%** (**+4.2%**) | **+4.7%** (**+4.3%**) | **-2.8%** (**+2.9%**) | **+2.0%** (**+3.7%**) |
+| **Android Cortex-A53 (`thumbv7neon`, FFI)** | **-3.7%** (**+3.5%**) | **+3.4%** (**+3.7%**) | **-3.7%** (**+2.4%**) | **+0.9%** (**+2.5%**) |
+| **`linux` i9-11900KF (native + fat LTO, Direct)** | **+6.6%** (-0.4%) | **+14.3%** (-0.2%) | **+8.5%** (0.0%) | **+11.5%** (-0.1%) |
+| **`linux` i9-11900KF (native + fat LTO, FFI)** | **+5.4%** (-1.5%) | **+14.0%** (-1.2%) | **+7.5%** (-0.9%) | **+11.5%** (-0.4%) |
+| **`mac` Apple M5 Max (`arm64`, Direct)** | **+22.0%** (**+5.6%**) | **+16.5%** (**+2.4%**) | **+17.6%** (**+3.6%**) | **+15.0%** (+0.3%) |
+| **`mac` Apple M5 Max (`arm64`, FFI)** | **+21.1%** (**+0.9%**) | **+17.2%** (0.0%) | **+16.8%** (**+0.8%**) | **+14.8%** (-0.1%) |
+
+`simpleperf stat` on Android Cortex-A53 (500 iterations, `taskset 4`, stable `rustc 1.99.1`):
+- `wiki-Brotli.html` (`q5` static): C `1,541.4M` instructions / `22.70M` branch misses (`163.2 MiB/s`); **Rust `d889cc0` Direct `1,598.7M` instructions (within 3.7% of C, down from `1,890.1M` in `6082a30` and `1,639.5M` in `d536284`) / `24.13M` branch misses (`157.8 MiB/s`)**.
+- `bootstrap-5.3.3.min.css` (`q6` static): C `1,304.9M` instructions / `16.59M` branch misses (`224.2 MiB/s`); **Rust `d889cc0` Direct `1,341.7M` instructions (within 2.8% of C, down from `1,426.3M` in `d536284`) / `16.80M` branch misses (`221.3 MiB/s`, within 1.3% of C)**.
+- `wiki-Brotli.html` (`q11` static): C `5,253.7M` instructions / `45.16M` branch misses (`156.9 MiB/s`); **Rust `d889cc0` Direct `5,458.1M` instructions (within 3.9% of C, down from `5,571.6M` in `d536284`) / `45.47M` branch misses (-1.53M vs `pbr22`, matching C) (`144.3 MiB/s`, +5.8% faster than `pbr22`)**.
