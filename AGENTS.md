@@ -768,6 +768,118 @@ numbers with the exact command, machine, and commit SHAs.
     (`forbid(unsafe_code)`) passes, zero added `unsafe`. Pushed `perf`
     (`45d09e0`) to `pmeenan/rust-brotli-decompressor`, deleted temporary
     `persistent-br` branch, and updated submodule pointer.
+- **2026-10-31** - ARMv7 16-bit unaligned loads, FFI single-zero alloc, and
+  outer-loop register pressure fixes (`vendor/rust-brotli-decompressor:perf`,
+  commit `d536284`):
+  - **Changes landed (`d536284`):**
+    1. Changed 32-bit `BrotliLoad16LE`, `BrotliFastBitReader::fill`, and
+       `BrotliFastBitReader::read_bits` (`n_bits > 16` second refill) in
+       `src/bit_reader/mod.rs` from slice destructuring (`if let &[a, b, ..] =
+       ...`) to `.get(..2).and_then(|s| s.try_into().ok())`. On `rustc 1.99.1`
+       (LLVM 22) for `thumbv7neon`, slice destructuring emitted two `i8` loads +
+       shifts and prevented LLVM from combining them into `ldrh`, adding an
+       extra spill/reload per 16-bit refill. Using `try_into()` on a 2-byte
+       subslice emits `load i16, align 1` directly in LLVM IR and compiles to
+       post-indexed `ldrhcs.w r0, [r9], #2` (-80M to -110M instructions on
+       `wiki-Brotli.html` q5 static on Cortex-A53).
+    2. Marked `try_alloc_default_slice` `#[inline(never)]` in
+       `src/ffi/alloc_util.rs`. Previously, inlining `try_alloc_default_slice`
+       into `SubclassableAllocator::alloc_cell` caused SimplifyCFG on 32-bit ARM
+       to tail-merge `try_alloc_default_slice`'s zero-fill loop with the custom
+       `alloc_func` branch's zero-fill loop before LoopIdiomRecognize +
+       InstCombine could fold `alloc_zeroed` + `memset` into `calloc`, causing
+       the default FFI allocator to call `__rust_alloc_zeroed` (`calloc`) and
+       then call `memset` on every ringbuffer and Huffman table allocation. With
+       `#[inline(never)]`, `try_alloc_default_slice` folds to a single `__calloc`
+       call (-76.5M instructions on `wiki-Brotli.html` q5 static FFI on
+       Cortex-A53, bringing FFI within ~0.5% of Direct).
+    3. Marked `huffman_tree`, `distance_root_table`, `literal_huffman_tree`, and
+       `command_huffman_tree` in `src/decode.rs` with
+       `#[cfg_attr(target_arch = "aarch64", inline(always))]` and
+       `#[cfg_attr(not(target_arch = "aarch64"), inline(never))]` (plus
+       `literal_huffman_tree_inline` for `fill_context_trees`), and marked
+       `InitializeCompoundDictionaryCopy` and `CopyFromCompoundDictionary`
+       `#[inline(never)]`. On 16-register `arm` and `x86_64`, outlining the 4
+       tree-view helpers prevents LICM from hoisting `group.htrees`/`group.codes`
+       slice descriptors and spilling them at the outer command loop backedge
+       (-2.85% instructions on ARMv7, +2.5% to +4.2% throughput on `x86_64`); on
+       32-register `aarch64`, keeping them inline avoids call overhead without
+       spilling.
+    4. Extracted `CopyFromCustomSharedDictionary` (`#[inline(never)]`) taking
+       `pos: i32` by value and returning `(BrotliDecoderErrorCode, i32)` (avoiding
+       `&mut pos`, which previously escaped `pos`'s address to a stack `alloca`
+       and caused 3 redundant stack stores of `pos` per command), and extracted
+       `PostWrapCopy` (`#[inline(never)]`) for the cold
+       `BROTLI_STATE_COMMAND_POST_WRAP_COPY` state body so
+       `copy_overlapping_backreference` does not clobber callee-saved registers
+       in the hot `memmove16` path.
+    5. Kept `state` in a local variable across `ProcessCommandsInternal` and
+       wrote `s.loop_counter = i` on exit only when `state` is `COMMAND_INNER`,
+       `COMMAND_INNER_WRITE`, `COMMAND_POST_WRAP_COPY`, or
+       `COMMAND_POST_WRITE_2`.
+    6. Rewrote `ReplicateValue` in `src/huffman/mod.rs` to step forward with
+       `slice.get_mut(pos)` and changed `NextTableBitSize` `left` from `i64` to
+       `i32` (-22.1M instructions in `BrotliBuildHuffmanTable` on
+       `wiki-Brotli.html` q5 static on Cortex-A53).
+  - **What was tried and reverted:**
+    - Outlining `ReadCommandInternal` or `ReadDistanceInternal` (`#[inline(never)]`):
+      passing `&mut BrotliFastBitReader` across call boundaries spilled the bit
+      reader's 4 registers on every command (+153M instructions on
+      `wiki-Brotli.html` q5 static). Reverted.
+    - Splitting the fast literal loops into separate `#[inline(never)]` helpers:
+      spilled `BrotliFastBitReader` across every literal run (+158M instructions).
+      Reverted.
+    - Caching `htrees[0]` as a fixed-size `&[HuffmanCode; 1080]` slice in the
+      trivial literal loop: extra outer-loop live value spilled 2 registers
+      (+135M instructions). Reverted.
+    - Outlining the 4 Huffman tree-view helpers unconditionally on `aarch64`
+      (`pbr9` on `mac`): cost ~2.5% on Direct on 32-register M5 Max where LICM
+      does not spill. Gated with `#[cfg_attr(target_arch = "aarch64",
+      inline(always))]`.
+  - **Android Cortex-A53 (`thumbv7neon`, `cpu2` @ 2.30 GHz, stable `rustc 1.99.1`):**
+    - `simpleperf stat` (1000 iterations, `q5 static`):
+      - `wiki-Brotli.html`: C `3,082.8M` instructions (`162.3 MiB/s`); Rust
+        `45d09e0` Direct `3,489.6M` (`140.0 MiB/s`) -> **`3,279.0M` instructions
+        (-210.6M vs `45d09e0`, -500.3M vs `6082a30`, `154.7 MiB/s`)**; **Rust FFI
+        `3,361.3M -> 3,284.8M` instructions (-76.5M, `155.4 MiB/s`)**.
+      - `jquery-3.7.1.min.js`: C `2,386.1M` (`84.8 MiB/s`); Rust `45d09e0` Direct
+        `2,585.8M` (`74.9 MiB/s`) -> **`2,439.5M` instructions (-146.3M vs
+        `45d09e0`, within 2.2% of C's instructions, `81.8 MiB/s`)**.
+      - `dict:jquery`: C `919.3M` (`204.5 MiB/s`); **Rust Direct `848.6M`
+        instructions (`222.6 MiB/s`, +8.9% faster than C)**.
+    - 144-cell decode benchmark (`docs/baseline/bench-2026-10-31-android-neon-*-pbr9.csv`):
+      - **Direct API vs C**: **`-6.4%` static std, `+0.4%` static dict, `-5.5%`
+        flushed std, `-1.6%` flushed dict** (`-4.2%` overall across all 144
+        cells; **`+7.8% / +6.5% / +7.5% / +6.0%` faster than `45d09e0`** and
+        **`+14.1%` faster than `05ee043`**).
+      - **C FFI vs C**: **`-7.0%` static std, `-0.3%` static dict, `-6.0%`
+        flushed std, `-1.6%` flushed dict** (was `-21.5% / -15.8% / -19.6% /
+        -15.1%` in `05ee043`, now within ~0.5% of Direct).
+      - The remaining `-5.5%` to `-6.4%` non-dictionary gap on 32-bit ARMv7 is
+        smaller than the combined ~7% cost of safe Rust's mandatory ringbuffer
+        zero-initialization (`calloc`/`memset`, ~3%) and C's
+        `BROTLI_HUFFMAN_CODE_FAST_LOAD` single-`ldr` `HuffmanCode` layout (~4%,
+        which would require a breaking change to `pub struct HuffmanCode`).
+  - **Linux i9-11900KF (@ 3.5 GHz, 144 cells, `docs/baseline/bench-2026-10-31-linux-native-*-pbr9.csv`):**
+    - **Direct API**: **`+7.0%` static std, `+14.5%` static dict, `+8.5%`
+      flushed std, `+11.6%` flushed dict vs C** (`+2.5% / +3.7% / +3.1% / +3.1%`
+      faster than `45d09e0`).
+    - **C FFI**: **`+7.0%` static std, `+15.4%` static dict, `+8.5%` flushed
+      std, `+12.0%` flushed dict vs C** (`+2.4% / +4.2% / +3.0% / +2.9%` faster
+      than `45d09e0`).
+  - **Apple M5 Max (`arm64`, 144 cells, `docs/baseline/bench-2026-10-31-mac-m5max-*-pbr9.csv`):**
+    - **Direct API**: **`+15.5%` static std, `+13.8%` static dict, `+13.5%`
+      flushed std, `+14.6%` flushed dict vs C**.
+    - **C FFI**: **`+20.0%` static std, `+17.2%` static dict, `+15.9%` flushed
+      std, `+14.9%` flushed dict vs C** (`+1.5% / +2.2% / +1.9% / +3.0%` faster
+      than `45d09e0`).
+  - **Gates:** `--verify` 600/600 decode parity (440/600 exact) on `linux`
+    x86-64 (Direct and FFI) and 50/50 q5 on Android (Direct and FFI), dict-span
+    repro 4/4 pass, `scripts/test_armv7.sh` (debug and `--release` under
+    `qemu-arm`) pass, `cargo test --release` x86-64 + `ffi_default_allocator_failure`
+    pass, default-feature `cargo build --release` (`forbid(unsafe_code)`) passes,
+    zero added `unsafe`. Pushed `perf` (`d536284`) to
+    `pmeenan/rust-brotli-decompressor` and updated submodule pointer.
 
 ## Maintaining documentation
 

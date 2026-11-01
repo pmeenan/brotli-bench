@@ -162,10 +162,10 @@ equal `upstream/master`.
 | rust-brotli | `fix-dict-span` | `822b2dc` | `master` (`6df909c`) | patch 0008 | verify 600/600 decode, 200/600 exact; span repro passes; cargo test 43/43 | yes |
 | rust-brotli | `parity` | `27a1859` | `fix-dict-span` | patches 0001-0007 | verify 600/600 decode, 440/600 exact (408/408 standard, 32 dictionary q0/q1); span repro passes; cargo test 43/43 | yes |
 | rust-brotli | `perf` | `27a1859` | `parity` | (empty) | same as `parity` | yes |
-| rust-brotli-decompressor | `perf` | `45d09e0` | `master` (`2ed02ed`) | 7 commits (`0466359`, `1344c34`, `081c5d9`, `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`): bit-reader/transform, metablock reuse & prefix-code setup, `ProcessCommandsInternal` & compound dict fast path, FFI `SubclassableAllocator` drop-glue & state copy elimination, 32-bit bit-reader & ARMv7 bounds-check fast paths, review hardening (32-bit reader under test, debug asserts, upstream guards), persistent `BrotliFastBitReader` & ARMv7 hot-loop optimizations | verify 600/600 decode, 440/600 exact (x86 and Android); span repro passes; default build (`forbid(unsafe_code)`) passes; cargo test x86-64 and armv7 (`scripts/test_armv7.sh`), debug and release | yes |
+| rust-brotli-decompressor | `perf` | `d536284` | `master` (`2ed02ed`) | 8 commits (`0466359`, `1344c34`, `081c5d9`, `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`, `d536284`): bit-reader/transform, metablock reuse & prefix-code setup, `ProcessCommandsInternal` & compound dict fast path, FFI `SubclassableAllocator` drop-glue & state copy elimination, 32-bit bit-reader & ARMv7 bounds-check fast paths, review hardening (32-bit reader under test, debug asserts, upstream guards), persistent `BrotliFastBitReader` & ARMv7 hot-loop optimizations, ARMv7 16-bit unaligned loads + FFI single-zero alloc + outer-loop register pressure fixes | verify 600/600 decode, 440/600 exact (x86 and Android); span repro passes; default build (`forbid(unsafe_code)`) passes; cargo test x86-64 and armv7 (`scripts/test_armv7.sh`), debug and release | yes |
 
 The superproject pins `vendor/rust-brotli` at `perf` (`27a1859`),
-`vendor/rust-brotli-decompressor` at `perf` (`45d09e0`), and
+`vendor/rust-brotli-decompressor` at `perf` (`d536284`), and
 `vendor/brotli-c` at `d89c4b1`. To measure the unpatched baseline encoder,
 check out `master` (`6df909c`) in `vendor/rust-brotli` and rebuild.
 

@@ -692,3 +692,39 @@ three platforms:
 `simpleperf stat` on Android Cortex-A53 (1000 iterations, `q5 static`, stable `rustc 1.99.1`):
 - `wiki-Brotli.html`: C `3,082.8M` instructions / `3,297.8M` cycles (`160.5 MiB/s`); Rust `6082a30` `3,780.3M` / `4,004.4M` (`125.4 MiB/s`); **Rust `45d09e0` `3,573.3M` instructions (-206.9M, -29.7% of excess over C) / `3,783.9M` cycles (`136.4 MiB/s`, +8.8%)**.
 - `jquery-3.7.1.min.js`: C `2,386.2M` instructions / `2,388.6M` cycles (`82.4 MiB/s`); Rust `6082a30` `2,818.9M` / `2,866.7M` (`68.4 MiB/s`); **Rust `45d09e0` `2,626.1M` instructions (-192.8M, -44.6% of excess over C) / `2,639.3M` cycles (`74.3 MiB/s`, +8.6%)**.
+
+## ARMv7 16-bit unaligned loads, FFI single-zero alloc & loop register pressure: `d536284` (2026-10-31)
+
+Measured after `vendor/rust-brotli-decompressor:perf` commit `d536284`
+(`.get(..2).and_then(|s| s.try_into().ok())` for single `ldrh` 16-bit unaligned
+refills on 32-bit targets, `#[inline(never)]` on `try_alloc_default_slice` so
+32-bit FFI allocations fold to a single `calloc` without a redundant `memset`,
+`#[cfg_attr(not(target_arch = "aarch64"), inline(never))]` on the 4 Huffman
+tree-view helpers to prevent outer-loop LICM slice spills on 16-register `arm`
+and `x86_64`, `#[inline(never)]` `CopyFromCustomSharedDictionary` taking `pos`
+by value and `PostWrapCopy`, local `state` variable in `ProcessCommandsInternal`,
+and simplified `ReplicateValue` + 32-bit `NextTableBitSize`) on the 144-cell
+default benchmark subset across all three platforms:
+
+| Artifact | Platform & Config |
+| --- | --- |
+| [baseline/bench-2026-10-31-android-neon-direct-pbr9.csv](baseline/bench-2026-10-31-android-neon-direct-pbr9.csv) | Android (Cortex-A53 @ 2.30 GHz `cpu2`, Thumb-2 + NEON), `perf` (`d536284`), Direct Rust API |
+| [baseline/bench-2026-10-31-android-neon-ffi-pbr9.csv](baseline/bench-2026-10-31-android-neon-ffi-pbr9.csv) | Android (Cortex-A53 @ 2.30 GHz `cpu2`, Thumb-2 + NEON), `perf` (`d536284`), C FFI |
+| [baseline/bench-2026-10-31-linux-native-direct-pbr9.csv](baseline/bench-2026-10-31-linux-native-direct-pbr9.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`d536284`), Direct Rust API |
+| [baseline/bench-2026-10-31-linux-native-ffi-pbr9.csv](baseline/bench-2026-10-31-linux-native-ffi-pbr9.csv) | `linux` (i9-11900KF @ 3.5 GHz), native CPU + fat LTO, `perf` (`d536284`), C FFI |
+| [baseline/bench-2026-10-31-mac-m5max-direct-pbr9.csv](baseline/bench-2026-10-31-mac-m5max-direct-pbr9.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`d536284`), Direct Rust API |
+| [baseline/bench-2026-10-31-mac-m5max-ffi-pbr9.csv](baseline/bench-2026-10-31-mac-m5max-ffi-pbr9.csv) | `mac` (Apple M5 Max `arm64`), `perf` (`d536284`), C FFI |
+
+| Platform & Config (144 cells, `d536284`) | `static standard` vs C (vs `45d09e0`) | `static dictionary` vs C (vs `45d09e0`) | `flushed standard` vs C (vs `45d09e0`) | `flushed dictionary` vs C (vs `45d09e0`) |
+| --- | --- | --- | --- | --- |
+| **Android Cortex-A53 (`thumbv7neon`, Direct)** | **-6.4%** (**+7.8%**) | **+0.4%** (**+6.5%**) | **-5.5%** (**+7.5%**) | **-1.6%** (**+6.0%**) |
+| **Android Cortex-A53 (`thumbv7neon`, FFI)** | **-7.0%** (**+18.5% vs `05ee043`**) | **-0.3%** (**+18.4% vs `05ee043`**) | **-6.0%** (**+16.9% vs `05ee043`**) | **-1.6%** (**+15.9% vs `05ee043`**) |
+| **`linux` i9-11900KF (native + fat LTO, Direct)** | **+7.0%** (**+2.5%**) | **+14.5%** (**+3.7%**) | **+8.5%** (**+3.1%**) | **+11.6%** (**+3.1%**) |
+| **`linux` i9-11900KF (native + fat LTO, FFI)** | **+7.0%** (**+2.4%**) | **+15.4%** (**+4.2%**) | **+8.5%** (**+3.0%**) | **+12.0%** (**+2.9%**) |
+| **`mac` Apple M5 Max (`arm64`, Direct)** | **+15.5%** (-2.0%) | **+13.8%** (-1.3%) | **+13.5%** (-0.4%) | **+14.6%** (+1.3%) |
+| **`mac` Apple M5 Max (`arm64`, FFI)** | **+20.0%** (**+1.5%**) | **+17.2%** (**+2.2%**) | **+15.9%** (**+1.9%**) | **+14.9%** (**+3.0%**) |
+
+`simpleperf stat` on Android Cortex-A53 (1000 iterations, `q5 static`, stable `rustc 1.99.1`):
+- `wiki-Brotli.html`: C `3,082.8M` instructions (`162.3 MiB/s`); Rust `45d09e0` Direct `3,489.6M` (`140.0 MiB/s`) -> **Rust `d536284` Direct `3,279.0M` instructions (-210.6M vs `45d09e0`, -500.3M vs `6082a30`, `154.7 MiB/s`)**; **Rust `d536284` FFI `3,284.8M` instructions (-76.5M from `#[inline(never)]` on `try_alloc_default_slice`, `155.4 MiB/s`)**.
+- `jquery-3.7.1.min.js`: C `2,386.1M` instructions (`84.8 MiB/s`); Rust `45d09e0` Direct `2,585.8M` (`74.9 MiB/s`) -> **Rust `d536284` Direct `2,439.5M` instructions (-146.3M vs `45d09e0`, within 2.2% of C's instructions, `81.8 MiB/s`)**.
+- `dict:jquery`: C `919.3M` instructions (`204.5 MiB/s`); **Rust `d536284` Direct `848.6M` instructions (`222.6 MiB/s`, +8.9% faster than C)**.

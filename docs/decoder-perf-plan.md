@@ -345,11 +345,51 @@ check.
   (FFI)** vs C, while keeping `linux` i9-11900KF ahead of C (`+3.6% / +8.9% /
   +5.0% / +7.5%` Direct, `+3.9% / +10.5% / +4.8% / +8.4%` FFI).
 
+**Landed (`d536284`):**
+- Single `ldrh` 16-bit unaligned loads on 32-bit targets via
+  `.get(..2).and_then(|s| s.try_into().ok())` in `BrotliLoad16LE`,
+  `BrotliFastBitReader::fill`, and `BrotliFastBitReader::read_bits` (slice
+  destructuring emitted two `ldrb`s + shifts and prevented LLVM from combining
+  them into `ldrh`; `-80M` to `-110M` instructions on `wiki-Brotli.html` q5
+  static on Cortex-A53).
+- `#[inline(never)]` on `try_alloc_default_slice` in `src/ffi/alloc_util.rs`
+  so 32-bit FFI allocations fold to a single `calloc` instead of tail-merging
+  with the custom allocator branch and calling `calloc` + `memset` (`-76.5M`
+  instructions on `wiki-Brotli.html` q5 static FFI on Cortex-A53, bringing FFI
+  within ~0.5% of Direct).
+- `#[cfg_attr(target_arch = "aarch64", inline(always))]` +
+  `#[cfg_attr(not(target_arch = "aarch64"), inline(never))]` on `huffman_tree`,
+  `distance_root_table`, `literal_huffman_tree`, and `command_huffman_tree` to
+  prevent outer-loop LICM slice spills on 16-register `arm` and `x86_64`, plus
+  `#[inline(never)]` on `InitializeCompoundDictionaryCopy`,
+  `CopyFromCompoundDictionary`, `CopyFromCustomSharedDictionary` (taking `pos`
+  by value), and `PostWrapCopy`, local `state` in `ProcessCommandsInternal`,
+  and simplified `ReplicateValue` + 32-bit `NextTableBitSize` (`-22.1M`
+  instructions in `BrotliBuildHuffmanTable`).
+- Cuts another **210.6M instructions** on `wiki-Brotli.html` q5 static
+  (`3,489.6M -> 3,279.0M`, `-500.3M` vs `6082a30`, `154.7 MiB/s` Direct /
+  `155.4 MiB/s` FFI vs C's `3,082.8M` / `162.3 MiB/s`) and **146.3M
+  instructions** on `jquery-3.7.1.min.js` q5 static (`2,585.8M -> 2,439.5M`,
+  within 2.2% of C's `2,386.1M` instructions, `81.8 MiB/s` vs C's `84.8 MiB/s`).
+- Improves the 144-cell Android Cortex-A53 benchmark by another **+7.8% / +6.5% /
+  +7.5% / +6.0%** over `45d09e0` (**+14.1% overall over `05ee043`**), bringing
+  **Rust Direct vs C to `-6.4%` static std, `+0.4%` static dict, `-5.5%` flushed
+  std, `-1.6%` flushed dict** (`-4.2%` overall) and **Rust FFI vs C to `-7.0% /
+  -0.3% / -6.0% / -1.6%`**. The remaining `-5.5%` to `-6.4%` non-dictionary gap
+  is smaller than the combined ~7% cost of safe Rust's mandatory ringbuffer
+  zero-initialization (~3%) and C's `BROTLI_HUFFMAN_CODE_FAST_LOAD` single-`ldr`
+  `HuffmanCode` layout (~4%, which requires a breaking `pub struct HuffmanCode`
+  change).
+- Also improves `linux` i9-11900KF by another **+2.5% to +4.2%** to **`+7.0% /
+  +14.5% / +8.5% / +11.6%` (Direct)** and **`+7.0% / +15.4% / +8.5% / +12.0%`
+  (FFI)** vs C, and `mac` M5 Max FFI to **`+20.0% / +17.2% / +15.9% / +14.9%`**
+  vs C (`+15.5% / +13.8% / +13.5% / +14.6%` Direct).
+
 ## Deliverables and upstreaming
 
 - Small, self-contained commits on `rust-brotli-decompressor:perf`, each
   with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`,
-  `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`).
+  `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`, `d536284`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.
