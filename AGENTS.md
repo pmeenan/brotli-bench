@@ -1019,6 +1019,85 @@ numbers with the exact command, machine, and commit SHAs.
     `--no-default-features` pass; zero added `unsafe`. Pushed `perf`
     (`d889cc0`) to `pmeenan/rust-brotli-decompressor` and updated submodule
     pointer.
+- **2026-11-01** - `bootstrap-5.3.3.min.css` pathology analysis and fixes
+  (`vendor/rust-brotli-decompressor:perf`, commit `32e41d6`):
+  - **Root-cause of `bootstrap-5.3.3.min.css` gap and initial ringbuffer sizing:**
+    - `BrotliCalculateRingBufferSize` already sizes single-metablock (`is_last ==
+      true`) streams (`static` at `q0` and `q3..q11`) to the exact power-of-two
+      ceiling of the metablock length on the first allocation (`262,710` B for
+      `bootstrap-5.3.3.min.css`, `wiki-Brotli.html`, and `alice29.txt`; `131,638`
+      B for `jquery-3.7.1.min.js`) with zero reallocations. Multi-metablock
+      (`is_last == false`) streams (`flushed` mode and `q1`/`q2` `static`) start
+      at `max(1024, s.initial_ringbuffer_size, ceil_pow2(mb0_len))` and double up
+      to the window size (`BrotliState::set_initial_ring_buffer_size` configures
+      the non-last floor, and 4 unit tests in `src/decode.rs` assert the default
+      1024-byte initial floor).
+    - `bootstrap-5.3.3.min.css` (`232,803` B) is **97.9% back-reference copies
+      and only 2.1% literals** (`4,957` literals vs `227,846` copy bytes; `80.3%`
+      of commands have `insert_length == 0`, and `28.3%` have `17 <= copy_len <=
+      32`). Because it has almost no literals, C decodes the entire 232 KB stream
+      in only `2.26M–2.36M` instructions (~10 instructions/byte vs 35–55 on
+      `alice29`/`wiki-Brotli`). That magnifies fixed per-stream `calloc` zeroing
+      (`256 KB` ring buffer + up to `82 KB` Huffman tables at `q11` = `349 KB`
+      zeroed, ~150K instructions) to **~6.7% of all decode instructions on
+      `bootstrap` `q11`** (~3x higher share than on `wiki`/`alice29`), and
+      magnifies every instruction in the LZ77 copy and distance paths.
+  - **Changes landed (`32e41d6`):**
+    1. **`ReadDistanceInternal` `npostfix == 0` fast path for any `ndirect`:**
+       `bootstrap-5.3.3.min.css` at `q11` has `NPOSTFIX = 0, NDIRECT = 1`
+       (`s.distance_postfix_bits == 0, s.num_direct_distance_codes == 17`)—the
+       only stream in the default benchmark suite with `NDIRECT > 0`. Generalized
+       the `s.distance_postfix_bits == 0` fast path using
+       `code.checked_sub(ndirect)` so `NPOSTFIX == 0, NDIRECT > 0` streams take
+       the fast path instead of the 42-instruction `NPOSTFIX > 0` branch.
+    2. **`memmove16_from_ringbuffer` / `memmove16_offset16` /
+       `memcpy_within_slice` bounds-check GVN and spill elimination:** Used
+       matching `len < 32 || core::cmp::max(off_dst, off_src) > len - 32` bounds
+       checks in `memmove16_from_ringbuffer` and `memmove16_offset16` (always
+       valid since `kRingBufferAllocationSlack = 566 >= 32`), matched a 32-byte
+       slice prefix at `off_src`/`off_dst` in `memmove16_offset16` instead of
+       computing `dst_start + 16` / `src_start + 16`, and simplified safe
+       `memcpy_within_slice` to check bounds + non-overlap via `split_at_mut` +
+       `.get(..size)`. On 32-bit ARMv7 (`thumbv7neon`), LLVM GVN eliminates the
+       second bounds check on `17 <= copy_len <= 32` and all `dst_start`/`lr`
+       spills across the first 16-byte copy, shrinking the `17 <= copy_len <= 32`
+       branch from 20 instructions + 3 stack ops + 2 branches to 5 instructions.
+    3. **`fill_context_trees` RLE run caching:** `bootstrap_q11` has 31 literal
+       block switches across only 4,957 literals (`fill_context_trees` was 2.0%
+       of all decode instructions). Cached `prev_index -> prev_tree` across the
+       64-entry context-map loop to skip repeated `htrees`/`codes` slice bounds
+       checks on RLE runs.
+  - **What was tried and reverted:**
+    - Extracting `ReadDistancePostcode` as an `#[inline(never)]` helper taking
+      `&mut BrotliFastBitReader` (`pbr29`): taking the address of `br` prevented
+      LLVM SROA from keeping `br`'s fields in registers across `ProcessCommands`
+      (+73.5K instructions/decode on `bootstrap_q11`). Kept `ReadDistanceInternal`
+      inline without `&mut br` escaping.
+    - `*trees = Some(core::array::from_fn(...))` in `fill_context_trees`:
+      allocated 256 bytes on `fill_context_trees`'s stack and called `memcpy`.
+      Switched back to in-place `trees.get_or_insert([&EMPTY_LITERAL_TREE; 64])`
+      with the `prev_index -> prev_tree` loop.
+  - **Measurements (`32e41d6`):**
+    - **Android Cortex-A53 (`simpleperf stat`, per decode on
+      `bootstrap-5.3.3.min.css`):** `q11` instructions **`2,853,918 -> 2,717,203`
+      (`-136,715` ins/decode, `-4.8%`)**; `q6` `2,596,648 -> 2,577,817`
+      (`-18,831`); `q5` `2,677,746 -> 2,659,309` (`-18,436`); `q2` `3,334,363 ->
+      3,321,359` (`-13,004`). On the 144-cell Android benchmark, `bootstrap`
+      static `q11` improves from **`-13.9%` vs C (`d889cc0`) to `-8.3%` vs C**
+      (`+5.6` percentage points), and flushed `q11` improves from `-9.5%` to
+      **`-6.0%` vs C**.
+    - **Linux i9-11900KF (144-cell C FFI, `hostlock exclusive`):** `bootstrap`
+      static `q11` improves from **`-7.5%` vs C (`d889cc0`) to `-0.7%` vs C**;
+      overall **`+4.0%` static std, `+10.4%` static dict, `+6.4%` flushed std,
+      `+10.7%` flushed dict vs C**.
+    - **Apple M5 Max (`bootstrap-5.3.3.min.css`, Direct API):** **`+15.4%` static
+      (`+18.0%` at `q11`), `+14.2%` flushed vs C**.
+  - **Gates:** `--verify` 600/600 decode parity (440/600 exact) on `linux`
+    x86-64 (Direct and FFI), dict-span repro 24/24 pass, `scripts/test_armv7.sh`
+    (debug and `--release` under `qemu-arm`) pass, `cargo test --release` x86-64
+    passes, default-feature `cargo build --release` (`forbid(unsafe_code)`)
+    passes, zero added `unsafe`. Pushed `perf` (`32e41d6`) to
+    `pmeenan/rust-brotli-decompressor` and updated submodule pointer.
 
 ## Maintaining documentation
 

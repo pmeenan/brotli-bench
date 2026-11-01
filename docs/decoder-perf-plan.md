@@ -428,12 +428,33 @@ check.
   **`+6.6% / +14.3% / +8.5% / +11.5%` (Direct)** and **`+5.4% / +14.0% / +7.5% /
   +11.5%` (FFI)** vs C.
 
+**Landed (`32e41d6`):**
+- Generalized the metablock-invariant `s.distance_postfix_bits == 0` fast path
+  in `ReadDistanceInternal` to handle any `ndirect` via
+  `code.checked_sub(ndirect)` (`bootstrap-5.3.3.min.css` at `q11` has
+  `NPOSTFIX = 0, NDIRECT = 1` and previously missed the fast path 100% of the
+  time).
+- Unified the `len < 32 || max(off_dst, off_src) > len - 32` bounds check in
+  `memmove16_from_ringbuffer` and `memmove16_offset16`, matched a 32-byte slice
+  prefix at `off_src`/`off_dst` in `memmove16_offset16`, and checked bounds +
+  non-overlap via `split_at_mut` in safe `memcpy_within_slice`, allowing LLVM GVN
+  on 32-bit ARMv7 to eliminate the second bounds check on `17 <= copy_len <= 32`
+  and all `dst_start`/`lr` spills across the first 16-byte copy (shrinking the
+  `17 <= copy_len <= 32` branch from 20 instructions + 3 stack ops to 5
+  instructions).
+- Added `prev_index -> prev_tree` run caching in `fill_context_trees`.
+- Cuts **`136,715` instructions/decode (`-4.8%`)** on `bootstrap-5.3.3.min.css`
+  `q11` on Cortex-A53 (`2,853,918 -> 2,717,203`), improving `bootstrap` static
+  `q11` from `-13.9%` vs C to **`-8.3%` vs C** on Android (`flushed q11` `-9.5% ->
+  -6.0%`), from `-7.5%` vs C to **`-0.7%` vs C** on `linux` i9-11900KF, and
+  reaching **`+18.0%` vs C** (`+15.4%` static overall) on `mac` M5 Max.
+
 ## Deliverables and upstreaming
 
 - Small, self-contained commits on `rust-brotli-decompressor:perf`, each
   with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`,
   `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`, `d536284`, `03ac41a`,
-  `d889cc0`).
+  `d889cc0`, `32e41d6`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.

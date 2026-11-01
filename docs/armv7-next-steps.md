@@ -4,13 +4,13 @@ These are ideas for closing the remaining gap between the safe Rust decoder and 
 
 ## Where things stand
 
-- Fork: `vendor/rust-brotli-decompressor` `perf` at `d889cc0`.
+- Fork: `vendor/rust-brotli-decompressor` `perf` at `32e41d6`.
 - Android Cortex-A53, Thumb-2 + NEON on both sides, 144 cells (stable `rustc 1.99.1`):
   - Before `45d09e0` (`6082a30`): Direct -14.7% overall (-18.0% / -11.3% / -15.4% / -10.5% static std / static dict / flushed std / flushed dict); FFI (`05ee043`) -21.5% / -15.8% / -19.6% / -15.1%;
   - After `45d09e0`: Direct -10.3% overall (-13.0% / -5.3% / -12.0% / -6.1%);
   - After `d536284`: Direct -4.2% overall (-6.4% / +0.4% / -5.5% / -1.6%); FFI -7.0% / -0.3% / -6.0% / -1.6%;
-  - After `03ac41a` + `d889cc0` (`pbr27`):
-    - **Rust Direct vs C: `-0.7%` overall (`-2.5%` static std, `+4.7%` static dict, `-2.8%` flushed std, `+2.0%` flushed dict)** — **+4.2% / +4.3% / +2.9% / +3.7% faster than `d536284`**, **+10.7% faster than `45d09e0`**, and **+21.3% faster than `05ee043`**;
+  - After `03ac41a` + `d889cc0` + `32e41d6`:
+    - **Rust Direct vs C: `-0.7%` overall (`-2.5%` static std, `+4.7%` static dict, `-2.8%` flushed std, `+2.0%` flushed dict)** — **+4.2% / +4.3% / +2.9% / +3.7% faster than `d536284`**, **+10.7% faster than `45d09e0`**, and **+21.3% faster than `05ee043`**, with `bootstrap-5.3.3.min.css` static `q11` improved from `-13.9%` (`d889cc0`) to **`-8.3%` vs C** (`-136.7K` instructions/decode);
     - **Rust FFI vs C: `-1.8%` overall (`-3.7%` static std, `+3.4%` static dict, `-3.7%` flushed std, `+0.9%` flushed dict)**;
     - **Dictionary decode beats C on 32-bit ARMv7 in both static (`+4.7%` Direct, `+3.4%` FFI) and flushed (`+2.0%` Direct, `+0.9%` FFI) modes.**
 - On `wiki-Brotli.html` q5 static (500 iterations, stable `rustc 1.99.1`), `03ac41a` + `d889cc0` cuts Rust Direct instructions from `1,890.1M` (`6082a30`) -> `1,744.8M` (`45d09e0`) -> `1,639.5M` (`d536284`) -> **`1,598.7M` (within 3.7% of C's `1,541.4M`, `157.8 MiB/s` vs C's `163.2 MiB/s`)**; on `bootstrap-5.3.3.min.css` q6 static (500 iterations), from `1,426.3M` (`d536284`) -> **`1,341.7M` (-84.6M, within 2.8% of C's `1,304.9M`, `221.3 MiB/s` vs C's `224.2 MiB/s`)**; and on `wiki-Brotli.html` q11 static (500 iterations), from `5,571.6M` / `46.99M` branch misses -> **`5,458.1M` instructions / `45.47M` branch misses (-113.5M instructions, -1.53M branch misses matching C's `45.16M`, `144.3 MiB/s`, +5.8% faster than `pbr22`)**.
