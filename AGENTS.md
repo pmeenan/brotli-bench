@@ -170,7 +170,10 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
      [`docs/development.md`](docs/development.md):
      - Never commit to a fork's `master`.
      - Encoder work goes on the stack `fix-dict-span` -> `parity` -> `perf`;
-       decoder work goes on `perf`.
+       decoder work goes on `pr93-stack` (stacked on
+       dropbox/rust-brotli-decompressor#93; the superproject tracks it).
+       The decompressor's `perf` branch is the older stack on
+       `upstream/master`, kept for reference.
      - Each commit passes the verification gates.
      - Push the fork branch *before* bumping the submodule pointer here.
    - Build plumbing (patches, profiles, features) goes in `rust/`, not the
@@ -1473,6 +1476,12 @@ numbers with the exact command, machine, and commit SHAs.
       (lib, no-std, tests). `--features ffi-api` still needs Rust 1.57,
       because of upstream's `try_reserve_exact`.
     - No new `unsafe`.
+
+- **2026-11-02** - Switched the superproject's decompressor submodule from
+  `perf` (`2ba28cf`) to `pr93-stack` (`3db2d03`), and set `.gitmodules`
+  `branch = pr93-stack` for `vendor/rust-brotli-decompressor`. The fork now
+  has only `master`, `perf` and `pr93-stack`, all tracking `origin`. The
+  pre-rebase stack stays tagged `bench/2026-11-01-perf` (`73b34c7`).
 
 ## Maintaining documentation
 

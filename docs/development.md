@@ -70,8 +70,9 @@ rust-brotli-decompressor:
     It goes between `parity` and `perf`.
 
 The superproject records exact commit SHAs, not branch names. `.gitmodules`
-sets `branch = perf` for both forks, so `git submodule update --remote`
-follows the top of each stack once it is pushed.
+sets `branch = perf` for `vendor/rust-brotli` and `branch = pr93-stack` for
+`vendor/rust-brotli-decompressor`, so `git submodule update --remote` follows
+the top of each stack once it is pushed.
 
 ## Commit rules
 
@@ -171,7 +172,8 @@ equal `upstream/master`.
 | rust-brotli-decompressor | `pr93-stack` | `3db2d03` | [dropbox/rust-brotli-decompressor#93](https://github.com/dropbox/rust-brotli-decompressor/pull/93) (`6e358fd`) | Stacked on PR #93, carrying only what measured better than it, with no duplicated command loop. (1) `99c3aef`: #93's loop builds with Rust 1.47 (`safe: bool` instead of `const SAFE`, no `let`-`else` / `split_first_chunk`, two test fixes). (2) `788b28a`: our non-loop work (Huffman setup, buffer reuse, FFI allocation, padded LUTs, 32-bit `HuffmanCode` layout + `decode.h`), the 32-bit bit reader incl. a u32 `BitReaderSlice`; `BrotliFastBitReader` removed (`ReadSymbolCodeLengths` uses `BitReaderSlice`). (3) `3db2d03`: loop deltas (256-entry distance root windows + cold subtable lookup, NPOSTFIX==0 fast path and branchless NPOSTFIX>0, `kCmdLut & 1023`, single-chunk compound-dictionary copy, folded copy checks, 32-bit-scoped helper outlining, unit tests for the copy helpers). Same-session A/B vs `a9b3129` (144 cells, Direct vs C): Android A53 +0.3% -> +7.2%, x86-64 +11.2% -> +11.9%, M5 Max +24.1% -> +25.0% | verify 600/600 decode (Direct and FFI); debug stress 0 failures on x86-64 and armv7; cargo test x86-64 (default, release, `unsafe`, `no-default-features`) and armv7 (debug, release); every commit builds on stable, `thumbv7neon`, and Rust 1.47 (lib, no-std, tests); no new `unsafe` | yes |
 
 The superproject pins `vendor/rust-brotli` at `perf` (`27a1859`),
-`vendor/rust-brotli-decompressor` at `perf` (`2ba28cf`), and
+`vendor/rust-brotli-decompressor` at `pr93-stack` (`3db2d03`; the older
+`perf` stack is `2ba28cf`), and
 `vendor/brotli-c` at `d89c4b1`. To measure the unpatched baseline encoder,
 check out `master` (`6df909c`) in `vendor/rust-brotli` and rebuild.
 

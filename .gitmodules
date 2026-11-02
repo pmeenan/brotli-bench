@@ -4,7 +4,7 @@
 [submodule "vendor/rust-brotli-decompressor"]
 	path = vendor/rust-brotli-decompressor
 	url = https://github.com/pmeenan/rust-brotli-decompressor.git
-	branch = perf
+	branch = pr93-stack
 [submodule "vendor/rust-brotli"]
 	path = vendor/rust-brotli
 	url = https://github.com/pmeenan/rust-brotli.git
