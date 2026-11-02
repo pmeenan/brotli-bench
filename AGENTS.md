@@ -170,10 +170,10 @@ perf record -g ./build/bench_rust --op decode --mode static --quality 6 \
      [`docs/development.md`](docs/development.md):
      - Never commit to a fork's `master`.
      - Encoder work goes on the stack `fix-dict-span` -> `parity` -> `perf`;
-       decoder work goes on `pr93-stack` (stacked on
-       dropbox/rust-brotli-decompressor#93; the superproject tracks it).
-       The decompressor's `perf` branch is the older stack on
-       `upstream/master`, kept for reference.
+       decoder work goes on `pr93-stack` (on `master` after
+       dropbox/rust-brotli-decompressor#93 merged; the superproject tracks it).
+       The decompressor's `perf` branch is the older pre-#93 stack, kept for
+       reference.
      - Each commit passes the verification gates.
      - Push the fork branch *before* bumping the submodule pointer here.
    - Build plumbing (patches, profiles, features) goes in `rust/`, not the
@@ -1482,6 +1482,27 @@ numbers with the exact command, machine, and commit SHAs.
   `branch = pr93-stack` for `vendor/rust-brotli-decompressor`. The fork now
   has only `master`, `perf` and `pr93-stack`, all tracking `origin`. The
   pre-rebase stack stays tagged `bench/2026-11-01-perf` (`73b34c7`).
+- **2026-11-02** - Synced `vendor/rust-brotli-decompressor` `master` with
+  `upstream/master` (`61dbe68`, which merged PR #93 `b3eba49..9f9c422` and
+  added `61dbe68 Restore the Rust 1.47 build floor in the command loop`) and
+  rebased `pr93-stack` onto `master` (`6dcd0be`; old tip tagged
+  `bench/2026-11-02-pr93-stack` at `3db2d03`).
+  - Upstream `61dbe68` replaced `const SAFE: bool` with
+    `trait CommandLoopMode { const SAFE: bool; }` (`M::SAFE`), superseding our
+    earlier MSRV commit `99c3aef`. We folded the two remaining test-only Rust
+    1.47 fixes (`src/reader.rs`, `src/transform.rs`) into commit 1 (`88ceeb7`)
+    and adapted commit 2 (`6dcd0be`) (`read_distance`, `read_command`,
+    `ProcessCommandsInternal`) to `<M: CommandLoopMode>` (`M::SAFE`).
+  - **Gates on `6dcd0be` (and `88ceeb7`):** MSRV `cargo +1.47.0 check`
+    (`--lib`, `--no-default-features`, `--features unsafe`, `--tests`) passes
+    on both commits; `scripts/test_armv7.sh` (debug + `--release` under
+    `qemu-arm`) passes; `cargo test` (debug + `--release`) passes on x86-64;
+    `brotli_compare --verify` passes 600/600 (`ffi` and `direct`) plus the
+    dict-span repro; Android Cortex-A53 `brotli_compare --verify --quality 5`
+    passes and `simpleperf stat` confirms identical instruction/cycle counts
+    to `3db2d03`; zero added `unsafe`. Pushed `master` (`61dbe68`), tag
+    `bench/2026-11-02-pr93-stack` (`3db2d03`), and `pr93-stack` (`6dcd0be`) to
+    `pmeenan/rust-brotli-decompressor`.
 
 ## Maintaining documentation
 
