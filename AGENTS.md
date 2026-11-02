@@ -1409,6 +1409,70 @@ numbers with the exact command, machine, and commit SHAs.
     default-feature `cargo build --release` (`forbid(unsafe_code)`) passes; zero
     added `unsafe`. Force-pushed `perf` (`2ba28cf`) to
     `pmeenan/rust-brotli-decompressor` and updated submodule pointer.
+- **2026-11-02** - Stacked our decoder work on upstream PR
+  [dropbox/rust-brotli-decompressor#93](https://github.com/dropbox/rust-brotli-decompressor/pull/93)
+  (Luca Versari / Randell Jesup: unified `const SAFE` command loop over
+  `BitReaderSlice`, batched literals). The new branch `pr93-stack`
+  (`a9b3129`, pushed to `pmeenan/rust-brotli-decompressor`) sits on `6e358fd`
+  and carries only the pieces that measured better than #93.
+  - **Audit of the rebased `perf` (`2ba28cf`):** nothing missing, and the
+    32-bit right-aligned bit math is correct. Follow-ups:
+    - the `decode.h` layout hunk sits in `2ba28cf` instead of `039075a`;
+    - tighten two debug_asserts.
+
+    The rebase cost about 1.8 points on Android (same session: `73b34c7`
+    +5.4% vs `2ba28cf` +3.6% vs C).
+  - **#93 vs ours, before stacking** (144 cells, Direct vs C):
+    - Android A53: upstream master -30.6%, #93 -19.8%, ours +5.5%. #93 keeps
+      `reg_t = u64` on 32-bit targets.
+    - M5 Max: #93 +18.8%, ours +18.9%. #93 is 7-12% faster on static
+      standard q0-q9; ours is faster on flushed q2+, dictionary q3+ and
+      q10/q11.
+  - **Commits on #93:**
+    1. `99c3aef`: #93's loop builds with Rust 1.47. `const SAFE: bool`
+       becomes a `safe: bool` argument (callers pass constants into
+       `#[inline(always)]` bodies); `let`-`else` and `split_first_chunk`
+       are replaced; two upstream tests are fixed.
+    2. `75ff441`: our non-loop work plus the 32-bit `BrotliBitReader`.
+       `BitReaderSlice` is made `reg_t`-generic, with a u32 `ldrh` refill
+       and split >16-bit reads on 32-bit targets.
+    3. `a9b3129`: loop deltas:
+       - a per-block-type cache of the 4 distance trees;
+       - the NPOSTFIX==0 fast path and u32 distance math on 32-bit;
+       - `kCmdLut & 1023`;
+       - the single-chunk compound-dictionary copy.
+  - **Not carried:** our own command loop. It is about 680 lines; keeping it
+    for 32-bit targets would duplicate 800+ lines.
+  - **Tried and reverted on the A53** (neutral or worse):
+    - outlining block switches on 32-bit;
+    - an 8-bit-preload (3-byte refill) trivial-literal batch;
+    - preloading the `kCmdLut` fields.
+
+    #93's loop has 371-417 `[sp]` references in `ProcessCommands` vs 150
+    in ours, from more live values (per-command locals, the trimmed ring
+    buffer, the `fbr` fields).
+  - **Results** (144 cells, Rust Direct vs C):
+    - **x86-64 i9-11900KF** (tuned, `hostlock exclusive`; CSVs
+      `bench-2026-11-02-linux-native-direct-*.csv`): #93 +4.9%, ours
+      (`2ba28cf`) +8.1%, `pr93-stack` before the MSRV commit +10.8%,
+      **`pr93-stack` +13.2%** (+12.3 / +20.9 / +10.9 / +12.4 across
+      static std / static dict / flushed std / flushed dict; 144/144
+      cells at or above C).
+    - **M5 Max:** stage 2a (pre-MSRV) +24.8% vs ours +18.9% and #93 +18.8%.
+      The final MSRV build was not measured because `mac` went offline.
+    - **Android A53** (`bench-2026-11-02-android-neon-direct-*.csv`):
+      **`pr93-stack` +0.2%** vs ours (`2ba28cf`) +3.9% (same session). The
+      MSRV commit itself helped (+1.9 points on Android, +2.4 on x86).
+  - **Gates on `a9b3129`:**
+    - `--verify`: 600/600 decode parity, Direct and FFI (x86-64), plus
+      dictionary at lgwin 16 (192/192).
+    - Debug stress test: 0 failures on x86-64 and on armv7 (`qemu-arm`).
+    - `cargo test` on x86-64 (default, `--release`, `unsafe`,
+      `--no-default-features`, `ffi-api`) and on armv7 (debug and release).
+    - Every commit builds on stable, on `thumbv7neon`, and on Rust 1.47
+      (lib, no-std, tests). `--features ffi-api` still needs Rust 1.57,
+      because of upstream's `try_reserve_exact`.
+    - No new `unsafe`.
 
 ## Maintaining documentation
 
