@@ -1303,6 +1303,112 @@ numbers with the exact command, machine, and commit SHAs.
     `cargo build --release` (`forbid(unsafe_code)`) passes, zero added `unsafe`.
     Pushed `perf` (`73b34c7`) to `pmeenan/rust-brotli-decompressor` and updated
     submodule pointer.
+- **2026-11-01** - Rebased `vendor/rust-brotli-decompressor:perf` onto new
+  `upstream/master` (`1fa7153`), fixed MSRV 1.47 compatibility, and split into a
+  clean 3-commit series (`238e6b2`, `039075a`, `2ba28cf`):
+  - **Rebase & merge with `upstream/master` (`1fa7153`):**
+    1. Tagged the pre-rebase `perf` tip (`73b34c7`) as `bench/2026-11-01-perf`,
+       fast-forwarded `master` to `upstream/master` (`1fa7153`, 12 new upstream
+       commits by Randell Jesup and Daniel Horn), and merged our optimizations
+       with upstream's changes without duplication:
+       - Adopted upstream's `HuffmanTable` / `TableWindow` (`LITERAL_TABLE_WINDOW`,
+         `INSERT_COPY_TABLE_WINDOW`, `table_window`, `huffman_window`,
+         `LiteralTable`, `InsertCopyTable`), adding `DISTANCE_ROOT_WINDOW` using
+         upstream's `TableWindow` type and keeping `huffman_window`
+         `#[cfg_attr(not(target_arch = "aarch64"), inline(never))]` on 16-register
+         `arm` and `x86_64` to prevent LICM slice spills in `ProcessCommands`.
+       - Adopted upstream's right-aligned `BrotliBitReader` conventions and
+         `BrotliBitReaderClearUnclaimed`, keeping our 32-bit `reg_t` path (`u32`
+         / `16`-bit half-accumulator on non-64-bit targets, 24-bit `n_bits <= 8`
+         refill) and `BrotliFastBitReader` slice cursor.
+       - Adopted upstream's `brotli_decode_with_allocators` and
+         `try_reserve_exact(1)` in `src/ffi/mod.rs`, keeping our direct in-place
+         `BrotliState` initialization, `unsafe fn dealloc_state_fields`, and
+         `#[inline(never)]` `try_alloc_default_slice`.
+    2. **ARMv7 `ProcessCommands` prologue spill fix (`src/decode.rs`):**
+       Upstream's `CheckAndWarmupBitReader(&mut s.br, input)` at the top of
+       `ProcessCommandsInternal` caused LLVM GVN on 32-bit ARM to reuse the
+       loaded `s.br` values for `BrotliFastBitReader::new(&s.br, input)` across
+       the 3 `#[inline(never)]` tree-setup calls (`huffman_window`,
+       `huffman_window`, `load_distance_roots`), spilling `br.tail.ptr` and
+       `br.tail.len` in the command loop (`+21M` instructions on
+       `wiki-Brotli.html` static `q5`). Outlining `CheckAndWarmupBitReader` on
+       32-bit targets (`#[cfg_attr(not(target_pointer_width = "64"),
+       inline(never))]`) while keeping `BrotliFastBitReader::new`
+       `#[inline(always)]` prevents the live-range extension while allowing SROA
+       to keep `br` in registers (`656.5M -> 635.5M` instructions on
+       `wiki-Brotli.html` static `q5`, `574.7M -> 556.6M` on
+       `bootstrap-5.3.3.min.css` static `q5`).
+    3. **MSRV 1.47 compatibility (`src/decode.rs`):** Replaced the 3
+       `slice::fill` (Rust 1.50) calls (`s.code_length_histo`,
+       `s.symbols_lists_array[..max_code_length]`, `s.trivial_literal_contexts`)
+       with `iter_mut()` loops. Verified on `linux` that `cargo +1.47.0 check
+       --lib` succeeds in default, `--no-default-features`, and `--features
+       unsafe`.
+    4. **Expanded streaming stress test (`src/test.rs`, `scripts/test_armv7.sh`):**
+       Expanded `test_streaming_chunk_boundaries_and_corruptions` to 10
+       `testdata/` corpora and added assertions on truncated streams that
+       `BrotliDecompressStream` never returns `BrotliResult::ResultSuccess` and
+       that any partial output emitted before `NeedsMoreInput` / `ResultFailure`
+       is an exact prefix of `expected`. Added `RUST_TEST_THREADS=1` in
+       `scripts/test_armv7.sh` so user-mode `qemu-arm` does not hit process-wide
+       mmap lock contention across parallel test threads.
+    5. **Split into 3 self-contained commits on `perf` (`1fa7153..2ba28cf`):**
+       - `238e6b2`: `bit_reader: add 32-bit reg_t path and BrotliFastBitReader slice cursor`
+       - `039075a`: `huffman: optimize HuffmanCode layout, table build, and DISTANCE_ROOT_WINDOW`
+       - `2ba28cf`: `decode: reuse metablock buffers, use BrotliFastBitReader, and optimize command loop`
+  - **What was tried and reverted:**
+    - Outlining `BrotliFastBitReader::new` (`#[inline(never)]`, `pbr42`):
+      `BrotliFastBitReader` is 16 bytes (4 words) on 32-bit ARM, so EABI returns
+      it via a hidden `sret` stack pointer (`[sp, #296]`), preventing SROA from
+      promoting `br` to SSA registers before inlining (`656.5M -> 654.2M`
+      instructions on `wiki-Brotli.html` vs `635.5M` when outlining
+      `CheckAndWarmupBitReader` instead). Reverted.
+  - **Measurements (`2ba28cf`, 144-cell benchmark CSVs in
+    `docs/baseline/bench-2026-11-01-*-pbr44.csv`):**
+    - **Android Cortex-A53 (`thumbv7neon`, `cpu2` @ 2.30 GHz, stable `rustc 1.99.1`):**
+      - `simpleperf stat` vs `upstream/master` (`1fa7153`, 200 iterations,
+        Direct API):
+        - `wiki-Brotli.html` static `q5`: `upstream/master` (`1fa7153`) `984.6M`
+          instructions / `995.7M` cycles (`125.92 MiB/s`) -> **`2ba28cf` `635.5M`
+          instructions / `725.3M` cycles (`172.52 MiB/s`, `-35.5%` instructions,
+          `+37.0%` throughput vs `upstream/master`)**.
+        - `bootstrap-5.3.3.min.css` static `q5`: `upstream/master` (`1fa7153`)
+          `863.5M` instructions / `884.1M` cycles (`135.42 MiB/s`) -> **`2ba28cf`
+          `556.6M` instructions / `614.0M` cycles (`198.04 MiB/s`, `-35.5%`
+          instructions, `+46.2%` throughput vs `upstream/master`)**.
+      - **Rust FFI vs C (144 cells):** **`+4.1%` faster than C overall**
+        (**`+3.3%` static std, `+9.2%` static dict, `+1.9%` flushed std, `+4.9%`
+        flushed dict**; `112/144` cells beat C).
+      - **Rust Direct vs C (144 cells):** **`+3.1%` faster than C overall**
+        (**`+1.7%` static std, `+8.0%` static dict, `+1.2%` flushed std, `+4.8%`
+        flushed dict**; `103/144` cells beat C).
+    - **Linux i9-11900KF (@ 3.5 GHz, 144 cells, `tune_benchmark_host.py`):**
+      - **Rust FFI vs C:** **`+8.3%` faster than C overall** (`+6.3%` static
+        std, `+13.3%` static dict, `+7.2%` flushed std, `+9.8%` flushed dict;
+        `144/144` cells beat C; `+1.0%..+3.4%` faster at `q10`/`q11` than
+        `73b34c7`).
+      - **Rust Direct vs C:** **`+7.3%` faster than C overall** (`+4.9%` static
+        std, `+12.8%` static dict, `+6.1%` flushed std, `+9.1%` flushed dict;
+        `143/144` cells beat C).
+    - **Apple M5 Max (`arm64`, 144 cells):**
+      - **Rust Direct vs C:** **`+19.6%` faster than C overall** (`+22.7%`
+        static std, `+18.5%` static dict, `+18.7%` flushed std, `+16.6%` flushed
+        dict; `144/144` cells beat C; **`+3.5% / +2.4% / +2.9% / +1.9%` faster
+        than `73b34c7`**).
+      - **Rust FFI vs C:** **`+18.8%` faster than C overall** (`+21.5%` static
+        std, `+18.1%` static dict, `+17.8%` flushed std, `+16.4%` flushed dict;
+        `144/144` cells beat C; **`+2.5% / +2.1% / +2.4% / +1.9%` faster than
+        `73b34c7`**).
+  - **Gates:** Every commit in `upstream/master..perf` builds and passes
+    `cargo check --tests`; `--verify` 600/600 decode parity (440/600 exact) in
+    Direct and FFI modes on `linux` and `q5` on Android; dict-span repro 4/4
+    pass; MSRV `cargo +1.47.0 check --lib` (default, `--no-default-features`,
+    `--features unsafe`) passes; `scripts/test_armv7.sh` (debug and `--release`
+    under `qemu-arm`) passes; `cargo test` (debug and `--release`) x86-64 passes;
+    default-feature `cargo build --release` (`forbid(unsafe_code)`) passes; zero
+    added `unsafe`. Force-pushed `perf` (`2ba28cf`) to
+    `pmeenan/rust-brotli-decompressor` and updated submodule pointer.
 
 ## Maintaining documentation
 

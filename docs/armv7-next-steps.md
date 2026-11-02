@@ -4,7 +4,7 @@ These are ideas for closing the remaining gap between the safe Rust decoder and 
 
 ## Where things stand
 
-- Fork: `vendor/rust-brotli-decompressor` `perf` at `73b34c7`.
+- Fork: `vendor/rust-brotli-decompressor` `perf` at `2ba28cf` (rebased onto `upstream/master` `1fa7153` in 3 commits: `238e6b2`, `039075a`, `2ba28cf`; pre-rebase stack tagged `bench/2026-11-01-perf` at `73b34c7`).
 - Android Cortex-A53, Thumb-2 + NEON on both sides, 144 cells (stable `rustc 1.99.1`):
   - Before `45d09e0` (`6082a30`): Direct -14.7% overall (-18.0% / -11.3% / -15.4% / -10.5% static std / static dict / flushed std / flushed dict); FFI (`05ee043`) -21.5% / -15.8% / -19.6% / -15.1%;
   - After `45d09e0`: Direct -10.3% overall (-13.0% / -5.3% / -12.0% / -6.1%);
@@ -14,7 +14,11 @@ These are ideas for closing the remaining gap between the safe Rust decoder and 
   - After `73b34c7` (`docs/baseline/bench-2026-11-01-android-neon-*-pbr36.csv`):
     - **Rust Direct vs C: `+4.5%` faster than C overall (`+4.0%` static std, `+8.9%` static dict, `+2.8%` flushed std, `+4.6%` flushed dict; `114/144` cells beat C)** — **`+5.5%` static std and `+5.3%` flushed std faster than `afe3536`**;
     - **Rust FFI vs C: `+5.3%` faster than C overall (`+4.9%` static std, `+10.4%` static dict, `+3.0%` flushed std, `+5.8%` flushed dict; `117/144` cells beat C)** — **`+6.2%` static std and `+3.6%` flushed std faster than `afe3536`**, up from `-31.1%` at baseline `2ed02ed`;
-    - **Safe Rust now beats C across every category on 32-bit ARMv7 (`static std`, `static dict`, `flushed std`, and `flushed dict`) in both Direct and FFI modes.**
+  - After rebasing onto `upstream/master` (`1fa7153`) (`2ba28cf`, `docs/baseline/bench-2026-11-01-android-neon-*-pbr44.csv`):
+    - Cuts **35.5% of all instructions vs `upstream/master` (`1fa7153`)** on `wiki-Brotli.html` static `q5` (`984.6M -> 635.5M`, `+37.0%` throughput) and `bootstrap-5.3.3.min.css` static `q5` (`863.5M -> 556.6M`, `+46.2%` throughput);
+    - **Rust FFI vs C: `+4.1%` faster than C overall (`+3.3%` static std, `+9.2%` static dict, `+1.9%` flushed std, `+4.9%` flushed dict; `112/144` cells beat C)**;
+    - **Rust Direct vs C: `+3.1%` faster than C overall (`+1.7%` static std, `+8.0%` static dict, `+1.2%` flushed std, `+4.8%` flushed dict; `103/144` cells beat C)**;
+    - **Safe Rust beats C across every category on 32-bit ARMv7 (`static std`, `static dict`, `flushed std`, and `flushed dict`) in both Direct and FFI modes.**
 - On `wiki-Brotli.html` q5 static (500 iterations, stable `rustc 1.99.1`), `03ac41a` + `d889cc0` + `afe3536` + `73b34c7` cuts Rust Direct instructions from `1,890.1M` (`6082a30`) -> `1,744.8M` (`45d09e0`) -> `1,639.5M` (`d536284`) -> `1,598.7M` (`d889cc0`) -> `1,583.3M` (`afe3536`) -> **`1,511.7M` (1.9% fewer instructions and 3.9% fewer cycles than C's `1,541.4M`)**; on `bootstrap-5.3.3.min.css`, `73b34c7` brings `static` to `-1.5%` Direct / `-0.7%` FFI vs C and `flushed` to `-0.3%` Direct / `+0.1%` FFI vs C (where the remaining ~1% static gap on `bootstrap` is glibc `calloc` ringbuffer zero-initialization).
 
 ## Tooling (all on the dev VM; the device hangs off `linux` via adb)

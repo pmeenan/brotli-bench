@@ -553,12 +553,61 @@ check.
       static dict, `+15.6%` flushed std, `+14.8%` flushed dict; `144/144` cells
       beat C).
 
+### Step 9: Rebase onto `upstream/master` (`1fa7153`), MSRV 1.47 fix, and 3-commit split (`238e6b2`, `039075a`, `2ba28cf`, 2026-11-01) — **DONE**
+
+- Rebased `vendor/rust-brotli-decompressor:perf` from `2ed02ed` onto new
+  `upstream/master` (`1fa7153`, 12 upstream commits by Randell Jesup and Daniel
+  Horn; tagged pre-rebase tip `73b34c7` as `bench/2026-11-01-perf`), adopting
+  upstream's `HuffmanTable` / `TableWindow` (`LITERAL_TABLE_WINDOW`,
+  `INSERT_COPY_TABLE_WINDOW`, `table_window`, `huffman_window`, `LiteralTable`,
+  `InsertCopyTable`), right-aligned `BrotliBitReader` conventions,
+  `BrotliBitReaderClearUnclaimed`, `brotli_decode_with_allocators`, and
+  `try_reserve_exact(1)`.
+- Outlined `CheckAndWarmupBitReader` on 32-bit targets
+  (`#[cfg_attr(not(target_pointer_width = "64"), inline(never))]` in
+  `src/decode.rs`) so `s.br` values loaded in `CheckAndWarmupBitReader` do not
+  remain live across the 3 `#[inline(never)]` tree-setup calls at the entry of
+  `ProcessCommands` (eliminating an ARMv7 prologue register spill of `br.tail`
+  that otherwise added `~21M` instructions on `wiki-Brotli.html` `q5` static).
+- Replaced the 3 `slice::fill` (Rust 1.50) calls in `src/decode.rs` with
+  `iter_mut()` loops so `cargo +1.47.0 check --lib` compiles cleanly in default,
+  `--no-default-features`, and `--features unsafe`, and expanded
+  `test_streaming_chunk_boundaries_and_corruptions` in `src/test.rs` to 10
+  `testdata/` corpora with prefix assertions on truncated streams.
+- Split the branch into 3 focused commits on top of `1fa7153`: `238e6b2`
+  (`bit_reader`), `039075a` (`huffman`), and `2ba28cf` (`decode`).
+- **Results on top of `upstream/master` (`1fa7153`) (`docs/baseline/bench-2026-11-01-*-pbr44.csv`):**
+  - **Android Cortex-A53 (`armv7l`, Thumb-2 + NEON):**
+    - Cuts **35.5% of all instructions vs `upstream/master` (`1fa7153`)** on
+      `wiki-Brotli.html` static `q5` (`984.6M -> 635.5M`, `+37.0%` throughput)
+      and `bootstrap-5.3.3.min.css` static `q5` (`863.5M -> 556.6M`, `+46.2%`
+      throughput).
+    - **Rust FFI vs C (144 cells):** **`+4.1%` overall** (**`+3.3%` static std,
+      `+9.2%` static dict, `+1.9%` flushed std, `+4.9%` flushed dict**; `112/144`
+      cells beat C).
+    - **Rust Direct vs C (144 cells):** **`+3.1%` overall** (**`+1.7%` static std,
+      `+8.0%` static dict, `+1.2%` flushed std, `+4.8%` flushed dict**; `103/144`
+      cells beat C).
+  - **Linux i9-11900KF (@ 3.5 GHz, `x86_64`):**
+    - **Rust FFI vs C (144 cells):** **`+8.3%` overall** (`+6.3%` static std,
+      `+13.3%` static dict, `+7.2%` flushed std, `+9.8%` flushed dict; `144/144`
+      cells beat C, `+1.0%..+3.4%` faster at `q10`/`q11` than `73b34c7`).
+    - **Rust Direct vs C (144 cells):** **`+7.3%` overall** (`+4.9%` static std,
+      `+12.8%` static dict, `+6.1%` flushed std, `+9.1%` flushed dict; `143/144`
+      cells beat C).
+  - **Apple M5 Max (`aarch64`):**
+    - **Rust Direct vs C (144 cells):** **`+19.6%` overall** (`+22.7%` static std,
+      `+18.5%` static dict, `+18.7%` flushed std, `+16.6%` flushed dict; `144/144`
+      cells beat C, **`+3.5% / +2.4% / +2.9% / +1.9%` faster than `73b34c7`**).
+    - **Rust FFI vs C (144 cells):** **`+18.8%` overall** (`+21.5%` static std,
+      `+18.1%` static dict, `+17.8%` flushed std, `+16.4%` flushed dict; `144/144`
+      cells beat C, **`+2.5% / +2.1% / +2.4% / +1.9%` faster than `73b34c7`**).
+
 ## Deliverables and upstreaming
 
-- Small, self-contained commits on `rust-brotli-decompressor:perf`, each
-  with before/after numbers in the message (`0466359`, `1344c34`, `081c5d9`,
-  `fd8b2e8`, `05ee043`, `6082a30`, `45d09e0`, `d536284`, `03ac41a`,
-  `d889cc0`, `32e41d6`, `afe3536`, `73b34c7`).
+- Small, self-contained commits on `rust-brotli-decompressor:perf` on top of
+  `upstream/master` (`1fa7153`): `238e6b2`, `039075a`, `2ba28cf` (pre-rebase
+  stack tagged `bench/2026-11-01-perf` at `73b34c7`).
 - Push the fork branch, then bump the submodule here (development.md).
 - Batch related commits into upstream PRs to
   dropbox/rust-brotli-decompressor once a workstream shows a clear win.

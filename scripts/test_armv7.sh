@@ -16,6 +16,9 @@ target_dir="${CARGO_TARGET_DIR:-/tmp/brotli-bench-armv7-test}"
 export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=rust-lld
 export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUNNER=qemu-arm
 export RUSTFLAGS="-C link-self-contained=yes"
+# qemu-arm user-mode emulation can race mmap/munmap across concurrent musl
+# threads (occasionally failing libtest stdout writes with EFAULT).
+export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
 status=0
 cargo test --target armv7-unknown-linux-musleabihf --target-dir "$target_dir" \
   --no-fail-fast "$@" || status=$?
